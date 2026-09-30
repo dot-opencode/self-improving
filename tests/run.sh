@@ -228,6 +228,13 @@ run inbox
 expect_contains "inbox trailer has max ts" "ack: learn ack --until 2026-09-30T09:30:00Z"
 run inbox --kind failure
 expect_contains "inbox trailer follows filtered max ts" "ack: learn ack --until 2026-09-29T10:00:00Z"
+run inbox --limit 2
+if [ "$(printf '%s\n' "$OUT" | grep -c '^2026-')" = "2" ]; then pass "inbox --limit 2"; else fail "inbox --limit 2" "$OUT"; fi
+LIMIT_LAST="$(printf '%s\n' "$OUT" | grep '^2026-' | tail -n 1 | awk '{print $1}')"
+expect_contains "inbox --limit trailer is max of the shown batch" "ack: learn ack --until $LIMIT_LAST"
+run inbox --json --limit 1
+if [ "$(printf '%s\n' "$OUT" | grep -c '^{')" = "1" ]; then pass "inbox --json --limit 1"; else fail "inbox --json --limit 1" "$OUT"; fi
+expect_die "inbox --limit rejects 0" "positive integer" inbox --limit 0
 
 expect_ok "ack --until" ack --until 2026-09-29T23:59:59Z
 check ".ack file written" test "$(cat "$PDIR/inbox/.ack")" = "2026-09-29T23:59:59Z"

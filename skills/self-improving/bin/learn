@@ -28,7 +28,7 @@ usage: learn <command> [args]        (learn --version prints the version)
 
 commands:
   init [profile]                            set up the store and .learnings/ for this project (user-only)
-  inbox [--since <ts>] [--kind k] [--tier t] [--all] [--json]
+  inbox [--since <ts>] [--kind k] [--tier t] [--all] [--json] [--limit N]
                                             show plugin events (unacked by default)
   ack [--until <ts>]                        mark the inbox as processed
   add --key <area.symptom> --kind <k> --summary "<=120" --evidence "..." [--project p] [--behavior "..."] [--owner o]
@@ -510,7 +510,7 @@ read_ack() {
 }
 
 cmd_inbox() {
-  local since="" kind="" tier="" all=0 json=0 ack out maxts
+  local since="" kind="" tier="" all=0 json=0 limit="" ack out maxts
   while [ $# -gt 0 ]; do
     case "$1" in
       --since) [ $# -ge 2 ] || die "--since requires a value"; since="$2"; shift 2 ;;
@@ -518,16 +518,21 @@ cmd_inbox() {
       --tier) [ $# -ge 2 ] || die "--tier requires a value"; tier="$2"; shift 2 ;;
       --all) all=1; shift ;;
       --json) json=1; shift ;;
-      *) die "usage: learn inbox [--since <ts>] [--kind k] [--tier t] [--all] [--json]" ;;
+      --limit) [ $# -ge 2 ] || die "--limit requires a value"; limit="$2"; shift 2
+        [[ "$limit" =~ ^[1-9][0-9]*$ ]] || die "--limit must be a positive integer" ;;
+      *) die "usage: learn inbox [--since <ts>] [--kind k] [--tier t] [--all] [--json] [--limit N]" ;;
     esac
   done
   resolve_profile
   ack=""
   if [ "$all" -eq 0 ]; then ack="$(read_ack)"; fi
+  # --limit N: oldest N events (files are per-day, lines are appended in time order).
   if [ "$json" -eq 1 ]; then
-    inbox_stream raw "$since" "$ack" "$kind" "$tier"
+    if [ -n "$limit" ]; then inbox_stream raw "$since" "$ack" "$kind" "$tier" | { head -n "$limit"; cat >/dev/null; }
+    else inbox_stream raw "$since" "$ack" "$kind" "$tier"; fi
   else
     out="$(inbox_stream compact "$since" "$ack" "$kind" "$tier")"
+    if [ -n "$limit" ] && [ -n "$out" ]; then out="$(printf '%s\n' "$out" | { head -n "$limit"; cat >/dev/null; })"; fi
     if [ -n "$out" ]; then
       printf '%s\n' "$out"
       maxts="$(printf '%s\n' "$out" | awk '{ print $1 }' | LC_ALL=C sort | tail -n 1)"
