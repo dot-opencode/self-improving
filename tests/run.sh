@@ -341,6 +341,190 @@ mkdir -p "$TMP/other"
 ( cd "$TMP/other" && "$LEARN" status >/dev/null 2>&1 ); RC=$?
 if [ "$RC" -ne 0 ]; then pass "commands die without .learnings"; else fail "commands die without .learnings"; fi
 
+# --- dream ----------------------------------------------------------------
+# Fixture store (separate from the store above): profile "work" with unacked
+# inbox events, two similar candidates, one ready for proposal (seen=3) and one
+# stale (seen=1, old).
+DSTORE="$TMP/dstore"
+DPDIR="$DSTORE/work"
+mkdir -p "$TMP/dcwd"
+cd "$TMP/dcwd" || exit 1
+export LEARN_TODAY=2026-09-30
+export AGENT_LEARNINGS_HOME="$DSTORE"
+mkdir -p "$DPDIR/inbox" "$DPDIR/candidates" "$DPDIR/applied" "$DPDIR/rejected"
+git -C "$DSTORE" init -q
+
+dcand() {   # dcand <key> <desc> <seen> <last-seen> <projects> [status]
+  cat > "$DPDIR/candidates/$1.md" <<EOF
+---
+description: $2
+pattern-key: $1
+kind: correction
+seen: $3
+first-seen: 2025-01-01
+last-seen: $4
+projects: [$5]
+status: ${6:-candidate}
+---
+## Future behavior
+Do the right thing.
+
+## Evidence
+- $4 proj-a: something happened
+EOF
+}
+dcand test.pytest-wrong-cwd "run pytest from the repo root in a monorepo" 1 2026-09-29 proj-a
+dcand test.pytest-cwd-root "pytest monorepo: repo root cwd" 1 2026-09-29 proj-a
+dcand git.commit-scope "commit messages need a scope" 3 2026-09-29 proj-a
+dcand env.old-thing "some very old one-off" 1 2025-01-01 proj-a
+cat > "$DPDIR/inbox/2026-09-29.jsonl" <<'EOF'
+{"ts":"2026-09-29T10:00:00Z","kind":"failure","tool":"bash","head":"SECRET-EVENT-TEXT","project":"proj-a","session":"s1"}
+{"ts":"2026-09-29T11:00:00Z","kind":"correction","tier":"strong","marker":"m","snippet":"SECRET-EVENT-TEXT-2","project":"proj-a","session":"s1"}
+EOF
+"$LEARN" index --profile work >/dev/null 2>&1
+
+run dream --report
+expect_contains "dream --report: unacked section" "unacked inbox"
+expect_contains "dream --report: unacked count and range" "[work] 2 event(s), oldest 2026-09-29T10:00:00Z, newest 2026-09-29T11:00:00Z"
+expect_not_contains "dream --report: no event text" "SECRET-EVENT-TEXT"
+expect_contains "dream --report: similar section" "similar candidates"
+expect_contains "dream --report: similar pair" "[work] candidates/test.pytest-cwd-root.md <-> candidates/test.pytest-wrong-cwd.md"
+expect_contains "dream --report: ready section" "ready for proposal"
+expect_contains "dream --report: ready item" "[work] git.commit-scope — seen 3"
+expect_contains "dream --report: stale section" "stale (seen 1, older than 90 days"
+expect_contains "dream --report: stale item" "[work] env.old-thing"
+expect_contains "dream --report: summary" "dream: 2 unacked, 1 similar, 1 ready, 1 stale, 0 unusable"
+
+# proposal section removes it from "ready"; ack clears "unacked"
+printf '\n## Proposal\n- **Owner:** script:x\n' >> "$DPDIR/candidates/git.commit-scope.md"
+"$LEARN" ack --profile work --until 2026-09-29T11:00:00Z >/dev/null 2>&1
+run dream --report --profile work
+expect_not_contains "dream --report: candidate with Proposal not ready" "git.commit-scope — seen"
+expect_contains "dream --report: acked inbox gone from summary" "dream: 0 unacked, 1 similar, 0 ready, 1 stale, 0 unusable"
+
+# proposed without decision (>14d), unusable and hygiene sections
+dcand build.proposed-long "waiting for the user" 3 2026-09-01 proj-a proposed
+printf 'no frontmatter\n' > "$DPDIR/candidates/git.broken.md"
+dcand zzz.odd-area "unknown area here" 1 2026-09-29 proj-a
+"$LEARN" index --profile work >/dev/null 2>&1
+run dream --report
+expect_contains "dream --report: proposed-without-decision section" "proposed without decision"
+expect_contains "dream --report: proposed item" "[work] build.proposed-long"
+expect_contains "dream --report: unusable section" "unusable"
+expect_contains "dream --report: unusable frontmatter" "[work] candidates/git.broken.md"
+expect_contains "dream --report: hygiene unknown area" "unknown area 'zzz'"
+run dream --report --profile nope
+if [ "$RC" -ne 0 ] && [[ "$OUT" == *"no such profile"* ]]; then pass "dream --report unknown --profile dies"; else fail "dream --report unknown --profile" "$OUT"; fi
+expect_die "dream --report rejects --model" "usage: learn dream" dream --report --model a/b
+expect_die "dream rejects --stale-days without --report" "usage: learn dream" dream --stale-days 5
+run dream --report --stale-days 5000
+expect_not_contains "dream --report --stale-days widens window" "[work] env.old-thing"
+
+# --profile on ordinary commands (used by the dream agent from the store root)
+run inbox --profile work --all
+expect_contains "inbox --profile reads that profile" "SECRET-EVENT-TEXT"
+run doctor --profile work
+if [ "$RC" -ne 0 ] && [[ "$OUT" == *"BAD FRONTMATTER"* ]]; then pass "doctor --profile flags bad frontmatter"; else fail "doctor --profile" "exit $RC: $OUT"; fi
+rm -f "$DPDIR/candidates/git.broken.md" "$DPDIR/candidates/zzz.odd-area.md" "$DPDIR/candidates/build.proposed-long.md"
+"$LEARN" index --profile work >/dev/null 2>&1
+run doctor --profile work
+if [ "$RC" -eq 0 ]; then pass "doctor --profile clean"; else fail "doctor --profile clean" "$OUT"; fi
+
+# tidy store
+TSTORE="$TMP/tstore"
+mkdir -p "$TSTORE/home/inbox" "$TSTORE/home/candidates" "$TSTORE/home/applied" "$TSTORE/home/rejected"
+git -C "$TSTORE" init -q
+AGENT_LEARNINGS_HOME="$TSTORE" "$LEARN" add --profile home --key tool.only-one --kind workflow --summary "the only candidate" --evidence "e" --project proj-a >/dev/null 2>&1
+AGENT_LEARNINGS_HOME="$TSTORE" "$LEARN" ack --profile home --until 2026-09-30T00:00:00Z >/dev/null 2>&1
+OUT="$(AGENT_LEARNINGS_HOME="$TSTORE" "$LEARN" dream --report 2>&1)"; RC=$?
+expect_contains "dream --report tidy store" "dream: learnings are tidy — nothing to consolidate"
+
+# --print-config: placeholders substituted, valid JSON
+run dream --print-config
+if [ "$RC" -eq 0 ]; then pass "dream --print-config exits 0"; else fail "dream --print-config exits 0" "$OUT"; fi
+expect_not_contains "print-config: no __STORE__" "__STORE__"
+expect_not_contains "print-config: no __LEARN_BIN__" "__LEARN_BIN__"
+expect_not_contains "print-config: no __HOME__" "__HOME__"
+expect_contains "print-config: store substituted" "edit:$DSTORE/*"
+expect_contains "print-config: learn bin substituted" "shell:$LEARN inbox*"
+expect_contains "print-config: home substituted" "read:$HOME/.ssh/*"
+expect_contains "print-config: learn-dream agent" '"learn-dream"'
+if command -v node >/dev/null 2>&1; then
+  printf '%s\n' "$OUT" > "$TMP/dream-config.json"
+  check "print-config is valid JSON" node -e 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"))' "$TMP/dream-config.json"
+fi
+
+# dream without opencode on PATH
+NOOC_PATH="$TMP/emptybin:/usr/bin:/bin"
+mkdir -p "$TMP/emptybin"
+if PATH="$NOOC_PATH" command -v opencode >/dev/null 2>&1; then
+  echo "SKIP: dream without opencode (opencode exists in /usr/bin or /bin)"
+else
+  OUT="$(PATH="$NOOC_PATH" "$LEARN" dream 2>&1)"; RC=$?
+  if [ "$RC" -ne 0 ] && [[ "$OUT" == *"opencode not found on PATH"* ]]; then pass "dream without opencode dies cleanly"; else fail "dream without opencode dies cleanly" "exit $RC: $OUT"; fi
+fi
+
+# dream with a stub opencode: pre/post commits, .dream-last, undo hint
+STUBBIN="$TMP/stubbin"
+mkdir -p "$STUBBIN"
+cat > "$STUBBIN/opencode" <<'EOF'
+#!/usr/bin/env bash
+# stub: record the invocation, touch a candidate, print a summary line.
+{
+  printf 'cwd=%s\n' "$(pwd -P)"
+  printf 'home=%s\n' "$AGENT_LEARNINGS_HOME"
+  printf 'args=%s\n' "$*"
+  printf 'config=%s\n' "$OPENCODE_CONFIG_CONTENT"
+} > "$STUB_LOG"
+printf '\nstub touched\n' >> "$AGENT_LEARNINGS_HOME/work/candidates/git.commit-scope.md"
+[ "${STUB_FAIL:-0}" = 1 ] && { echo "boom" >&2; exit 3; }
+echo "working…"
+echo "triaged 2 events → +1 candidates, ~0 bumped, 1 noise / 0 merged / 0 proposed"
+EOF
+chmod +x "$STUBBIN/opencode"
+export STUB_LOG="$TMP/stub.log"
+"$LEARN" index --profile work >/dev/null 2>&1   # store is dirty (uncommitted fixture) -> pre-dream snapshot
+git -C "$DSTORE" config user.name t; git -C "$DSTORE" config user.email t@example.invalid
+PRE_COMMITS="$(git -C "$DSTORE" rev-list --count HEAD 2>/dev/null || echo 0)"
+OUT="$(PATH="$STUBBIN:$PATH" "$LEARN" dream --model prov/model-x 2>&1)"; RC=$?
+if [ "$RC" -eq 0 ]; then pass "dream with stub opencode exits 0"; else fail "dream with stub opencode" "exit $RC: $OUT"; fi
+expect_contains "dream prints undo hint" "undo: git -C $DSTORE revert HEAD"
+SUBJECTS="$(git -C "$DSTORE" log --format=%s)"
+if [[ "$SUBJECTS" == *"learn: pre-dream snapshot"* ]]; then pass "dream made pre-dream snapshot commit"; else fail "pre-dream snapshot" "$SUBJECTS"; fi
+if [ "$(git -C "$DSTORE" log -1 --format=%s)" = "learn: dream — triaged 2 events → +1 candidates, ~0 bumped, 1 noise / 0 merged / 0 proposed" ]; then pass "dream commit message uses agent summary"; else fail "dream commit message" "$(git -C "$DSTORE" log -1 --format=%s)"; fi
+check "dream leaves store clean" test -z "$(git -C "$DSTORE" status --porcelain --untracked-files=all)"
+check ".dream-last == HEAD" test "$(cat "$DSTORE/.dream-last")" = "$(git -C "$DSTORE" rev-parse HEAD)"
+check "stub ran in store root" grep -q "^cwd=$DSTORE$" "$STUB_LOG"
+check "stub got pinned AGENT_LEARNINGS_HOME" grep -q "^home=$DSTORE$" "$STUB_LOG"
+check "stub got --standalone --agent learn-dream --model" grep -q '^args=run --standalone --agent learn-dream --model prov/model-x ' "$STUB_LOG"
+check "stub config has no placeholders" bash -c '! grep -q "__STORE__\|__LEARN_BIN__\|__HOME__" "$1"' _ "$STUB_LOG"
+check "prompt reached the stub" grep -q "Goal: consolidate the store" "$STUB_LOG"
+
+# --if-changed: skip when nothing changed since .dream-last
+HEAD_BEFORE="$(git -C "$DSTORE" rev-parse HEAD)"
+rm -f "$STUB_LOG"
+OUT="$(PATH="$STUBBIN:$PATH" "$LEARN" dream --if-changed 2>&1)"; RC=$?
+if [ "$RC" -eq 0 ] && [[ "$OUT" == *"skipping"* ]] && [ ! -e "$STUB_LOG" ]; then pass "dream --if-changed skips when .dream-last == HEAD"; else fail "dream --if-changed skip" "exit $RC: $OUT"; fi
+check "skip made no commit" test "$(git -C "$DSTORE" rev-parse HEAD)" = "$HEAD_BEFORE"
+# a change outside candidates/inbox/applied/rejected does not trigger a run
+echo x > "$DSTORE/notes.txt"
+OUT="$(PATH="$STUBBIN:$PATH" "$LEARN" dream --if-changed 2>&1)"; RC=$?
+if [ "$RC" -eq 0 ] && [ ! -e "$STUB_LOG" ]; then pass "dream --if-changed ignores unrelated files"; else fail "dream --if-changed unrelated" "exit $RC: $OUT"; fi
+# a new inbox event triggers a run
+printf '{"ts":"2026-09-30T08:00:00Z","kind":"failure","tool":"bash","head":"x","project":"proj-a","session":"s2"}\n' > "$DPDIR/inbox/2026-09-30.jsonl"
+OUT="$(PATH="$STUBBIN:$PATH" "$LEARN" dream --if-changed 2>&1)"; RC=$?
+if [ "$RC" -eq 0 ] && [ -e "$STUB_LOG" ]; then pass "dream --if-changed runs after inbox change"; else fail "dream --if-changed runs" "exit $RC: $OUT"; fi
+check ".dream-last advanced to HEAD" test "$(cat "$DSTORE/.dream-last")" = "$(git -C "$DSTORE" rev-parse HEAD)"
+
+# failing opencode: die, leave changes uncommitted, keep .dream-last
+LAST_SHA="$(cat "$DSTORE/.dream-last")"
+OUT="$(STUB_FAIL=1 PATH="$STUBBIN:$PATH" "$LEARN" dream 2>&1)"; RC=$?
+if [ "$RC" -ne 0 ] && [[ "$OUT" == *"left uncommitted for review"* ]]; then pass "dream dies when opencode fails"; else fail "dream opencode failure" "exit $RC: $OUT"; fi
+check "failed dream keeps changes uncommitted" test -n "$(git -C "$DSTORE" status --porcelain --untracked-files=all)"
+check "failed dream keeps .dream-last" test "$(cat "$DSTORE/.dream-last")" = "$LAST_SHA"
+unset STUB_LOG LEARN_TODAY
+cd "$TMP/proj" || exit 1
+
 echo
 echo "passed: $PASSES, failed: $FAILS"
 [ "$FAILS" -eq 0 ]

@@ -13,6 +13,15 @@ STORE_HOME="$LEARN_HOME"
 AREAS="test build deps git shell edit scope spec ui lang verbosity tool env infra"
 KINDS="correction failure confirmation workflow"
 
+# Small RU + EN words dropped from `learn dream`'s similarity tokenizer; they
+# carry no topical signal and would otherwise inflate overlap scores.
+DREAM_STOPWORDS='the and for with that this from are was not use uses used when into only via per its has have all any but can must should does never always для при как что это или так все его она они без под над про есть быть надо нужно если чтобы когда только уже еще вот'
+export DREAM_STOPWORDS
+
+# Set by main() from `learn <cmd> --profile <p> ...`: address a profile of the
+# store directly instead of through ./.learnings (used by `learn dream`).
+PROFILE_OVERRIDE=""
+
 usage() {
   cat <<'EOF'
 usage: learn <command> [args]        (learn --version prints the version)
@@ -35,8 +44,18 @@ commands:
   prune [--days 90]                         seen=1 and idle candidates -> rejected (reason: stale);
                                             also deletes acked inbox/*.jsonl older than --days
   markers list | add --tier <t> "<re>" | test "<text>"
+  dream --report [--stale-days N] [--profile <p>]
+                                            read-only whole-store report: unacked inbox, similar
+                                            candidates, ready for proposal, stale, unusable
+  dream [--profile <p>] [--model <provider/model>] [--if-changed] [--print-config]
+                                            consolidate the store with a sandboxed OpenCode run
+                                            (AGENT_LEARNINGS_DREAM_MODEL sets the default model)
   backup [--push]                           commit (and push) the store
   install-opencode                          install the global OpenCode plugin
+
+profile-bound commands (inbox ack add bump propose apply reject index status doctor
+grep prune) take `--profile <p>` as their first argument to address a store profile
+without a ./.learnings symlink, e.g. `learn inbox --profile work --all`.
 EOF
 }
 
@@ -169,6 +188,16 @@ load_store() {
 # Sets PROFILE and PDIR (canonical profile dir) from ./.learnings.
 resolve_profile() {
   local target
+  if [ -n "$PROFILE_OVERRIDE" ]; then
+    require_slug "profile name" "$PROFILE_OVERRIDE"
+    load_store
+    PROFILE="$PROFILE_OVERRIDE"
+    [ -d "$STORE_HOME/$PROFILE" ] || die "no such profile in the store: $PROFILE"
+    PDIR="$(cd -P "$STORE_HOME/$PROFILE" && pwd -P)"
+    is_in_store "$PDIR" || die "unsafe profile directory: $PDIR is outside $STORE_HOME"
+    mkdir -p "$PDIR/inbox" "$PDIR/candidates" "$PDIR/applied" "$PDIR/rejected"
+    return 0
+  fi
   [ -L .learnings ] || die "no .learnings symlink here (ask the user to run: learn init <profile>)"
   load_store
   target="$(readlink .learnings)"
@@ -680,6 +709,7 @@ cmd_propose() {
   [ -f "$PDIR/candidates/$key.md" ] || die "no candidate '$key'"
   owner="$(oneline "$owner")"
   fm_set "$PDIR/candidates/$key.md" status proposed
+  fm_set "$PDIR/candidates/$key.md" proposed-at "$(today)"
   if [ -n "$owner" ]; then fm_set "$PDIR/candidates/$key.md" suggested-owner "$owner"; fi
   write_index
   echo "proposed $key"
@@ -872,10 +902,46 @@ doctor_dir_checks() {   # doctor_dir_checks <dirname>
   done
 }
 
+doctor_profile_checks() {   # uses PDIR
+  local d expected actual f
+  for d in inbox candidates applied rejected; do
+    [ -d "$PDIR/$d" ] || echo "warning: missing directory $d/ (created on first use)"
+  done
+  for d in candidates applied rejected; do doctor_dir_checks "$d"; done
+  if [ ! -f "$PDIR/INDEX.md" ]; then
+    dprob "MISSING INDEX: $PDIR/INDEX.md (run 'learn index')"
+  else
+    expected="$(render_index 2>/dev/null || true)"
+    actual="$(<"$PDIR/INDEX.md")"
+    [ "$expected" = "$actual" ] || dprob "INDEX DRIFT: INDEX.md differs from candidates/ (run 'learn index')"
+  fi
+  for f in "$PDIR"/applied/*.md; do
+    [ -e "$f" ] || continue
+    if [ -f "$PDIR/candidates/$(basename "$f")" ]; then
+      dprob "DUPLICATE KEY (in candidates/ and applied/): $(basename "$f" .md)"
+    fi
+  done
+}
+
 cmd_doctor() {
   [ $# -eq 0 ] || die "usage: learn doctor"
-  local target resolved d expected actual f
+  local target resolved
   DOC_PROBLEMS=0
+  if [ -n "$PROFILE_OVERRIDE" ]; then
+    # --profile <p>: check that profile directly (no ./.learnings needed).
+    require_slug "profile name" "$PROFILE_OVERRIDE"
+    if [ ! -d "$LEARN_HOME" ]; then dprob "STORE MISSING: $LEARN_HOME"; echo "problems: $DOC_PROBLEMS"; exit 1; fi
+    load_store
+    [ -d "$STORE_HOME/$PROFILE_OVERRIDE" ] || die "no such profile in the store: $PROFILE_OVERRIDE"
+    PDIR="$(cd -P "$STORE_HOME/$PROFILE_OVERRIDE" && pwd -P)"
+    PROFILE="$PROFILE_OVERRIDE"
+    is_in_store "$PDIR" || dprob "UNSAFE PROFILE DIR: $PDIR (outside $STORE_HOME)"
+    [ "$DOC_PROBLEMS" -gt 0 ] || doctor_profile_checks
+    doctor_markers_check
+    if [ "$DOC_PROBLEMS" -gt 0 ]; then die "problems found ($DOC_PROBLEMS)"; fi
+    echo "OK"
+    return 0
+  fi
   if [ ! -e .learnings ] && [ ! -L .learnings ]; then
     die "no .learnings symlink here (ask the user to run: learn init <profile>)"
   fi
@@ -898,27 +964,16 @@ cmd_doctor() {
       else
         PDIR="$resolved"
         PROFILE="$(basename "$target")"
-        for d in inbox candidates applied rejected; do
-          [ -d "$PDIR/$d" ] || echo "warning: missing directory $d/ (created on first use)"
-        done
-        for d in candidates applied rejected; do doctor_dir_checks "$d"; done
-        if [ ! -f "$PDIR/INDEX.md" ]; then
-          dprob "MISSING INDEX: $PDIR/INDEX.md (run 'learn index')"
-        else
-          expected="$(render_index 2>/dev/null || true)"
-          actual="$(<"$PDIR/INDEX.md")"
-          [ "$expected" = "$actual" ] || dprob "INDEX DRIFT: INDEX.md differs from candidates/ (run 'learn index')"
-        fi
-        for f in "$PDIR"/applied/*.md; do
-          [ -e "$f" ] || continue
-          if [ -f "$PDIR/candidates/$(basename "$f")" ]; then
-            dprob "DUPLICATE KEY (in candidates/ and applied/): $(basename "$f" .md)"
-          fi
-        done
+        doctor_profile_checks
       fi
     fi
   fi
-  # markers.json
+  doctor_markers_check
+  if [ "$DOC_PROBLEMS" -gt 0 ]; then die "problems found ($DOC_PROBLEMS)"; fi
+  echo "OK"
+}
+
+doctor_markers_check() {
   if [ -f "$STORE_HOME/markers.json" ]; then
     local merrs line
     if ! merrs="$(validate_markers_file "$STORE_HOME/markers.json")"; then
@@ -927,8 +982,6 @@ cmd_doctor() {
   else
     echo "warning: $STORE_HOME/markers.json missing (run 'learn init <profile>')"
   fi
-  if [ "$DOC_PROBLEMS" -gt 0 ]; then die "problems found ($DOC_PROBLEMS)"; fi
-  echo "OK"
 }
 
 cmd_grep() {
@@ -1071,6 +1124,436 @@ cmd_markers() {
 }
 
 # ---------------------------------------------------------------------------
+# dream
+#
+# `learn dream --report` is a read-only analysis of the whole store (all
+# profiles); `learn dream` hands it to a sandboxed OpenCode agent that triages
+# the inbox, merges duplicate candidates and prepares proposals, then rebuilds
+# the indexes and commits. The agent never applies anything.
+# ---------------------------------------------------------------------------
+
+# Profiles of the store (one per line), optionally only $1: valid-slug
+# directories that hold inbox/candidates/applied/rejected. Dot entries and
+# anything whose canonical path leaves the store are skipped.
+dream_profiles() {
+  local only="${1:-}" d name canon
+  for d in "$STORE_HOME"/*/; do
+    [ -d "$d" ] || continue
+    d="${d%/}"
+    name="${d##*/}"
+    valid_slug "$name" || continue
+    [ -z "$only" ] || [ "$only" = "$name" ] || continue
+    [ -d "$d/inbox" ] || [ -d "$d/candidates" ] || [ -d "$d/applied" ] || [ -d "$d/rejected" ] || continue
+    canon="$(cd -P "$d" 2>/dev/null && pwd -P)" || continue
+    is_in_store "$canon" || continue
+    printf '%s\n' "$name"
+  done
+}
+
+# Similar-candidate analysis. Reads sorted rows  profile<TAB>key<TAB>text  where
+# text is the key's symptom plus the description, and prints report lines.
+# Tokens are lowercased words; anything that is not [a-z0-9] or a byte >= 0x80
+# separates words (so Cyrillic words stay whole); words under 3 characters and
+# DREAM_STOPWORDS are dropped and duplicates collapse. A pair is reported when
+# it shares >= 2 words and |shared| / min(|A|,|B|) >= 0.6. Candidates of
+# different profiles are never compared.
+dream_pairs() {
+  LC_ALL=C awk -F'\t' '
+    BEGIN {
+      n = split(ENVIRON["DREAM_STOPWORDS"], stopArr, " ")
+      for (i = 1; i <= n; i++) STOP[stopArr[i]] = 1
+    }
+    function tokenize(id, text,   s, arr, nn, i, w, nw, seen, tmp, hi, clen) {
+      s = tolower(text)
+      gsub(/[^a-z0-9\200-\377]+/, " ", s)
+      nn = split(s, arr, " ")
+      nw = 0
+      for (i = 1; i <= nn; i++) {
+        w = arr[i]
+        tmp = w
+        hi = gsub(/[\200-\277]/, "", tmp)
+        clen = length(w) - hi
+        if (clen < 3) continue
+        if (w in STOP) continue
+        if (w in seen) continue
+        seen[w] = 1
+        WORD[id, ++nw] = w
+      }
+      return nw
+    }
+    {
+      N++
+      PROF[N] = $1; KEY[N] = $2
+      NW[N] = tokenize(N, $3)
+    }
+    END {
+      for (a = 1; a <= N; a++) {
+        for (b = a + 1; b <= N; b++) {
+          if (PROF[b] != PROF[a]) continue
+          shared = 0
+          delete SW
+          for (x = 1; x <= NW[a]; x++) {
+            wa = WORD[a, x]
+            for (y = 1; y <= NW[b]; y++) {
+              if (wa == WORD[b, y]) { if (!(wa in SW)) { SW[wa] = 1; shared++ }; break }
+            }
+          }
+          minlen = (NW[a] < NW[b]) ? NW[a] : NW[b]
+          if (!(shared >= 2 && minlen > 0 && (shared / minlen) >= 0.6)) continue
+          ns = 0
+          for (k in SW) sw2[++ns] = k
+          for (ii = 2; ii <= ns; ii++) {
+            tmp = sw2[ii]; jj = ii - 1
+            while (jj >= 1 && sw2[jj] > tmp) { sw2[jj + 1] = sw2[jj]; jj-- }
+            sw2[jj + 1] = tmp
+          }
+          list = "shared: " sw2[1]
+          for (ii = 2; ii <= ns; ii++) list = list ", " sw2[ii]
+          delete sw2
+          print "  [" PROF[a] "] candidates/" KEY[a] ".md <-> candidates/" KEY[b] ".md (" list ")"
+        }
+      }
+    }
+  '
+}
+
+# Number of lines in $1 (0 when empty).
+dream_count() {
+  if [ -z "$1" ]; then echo 0; else printf '%s\n' "$1" | grep -c '' || true; fi
+}
+
+# One report section: header plus the sorted body; nothing when body is empty.
+dream_emit() {   # dream_emit <header> <body>
+  [ -n "$2" ] || return 0
+  echo "$1"
+  printf '%s\n' "$2" | LC_ALL=C sort
+}
+
+# Accumulators filled by dream_scan_profile (one line per item, no trailing nl).
+D_UNACKED="" D_UNACKED_N=0 D_ROWS="" D_READY="" D_PROPOSED="" D_STALE="" D_UNUSABLE="" D_HYGIENE=""
+
+dream_add() {   # dream_add <var> <line>
+  local cur="${!1}"
+  if [ -n "$cur" ]; then printf -v "$1" '%s\n%s' "$cur" "$2"; else printf -v "$1" '%s' "$2"; fi
+}
+
+# Scan one profile read-only: sets PROFILE/PDIR and appends to the D_* vars.
+dream_scan_profile() {   # dream_scan_profile <profile> <stale-days> <today-days>
+  local prof="$1" stale_days="$2" today_days="$3"
+  local tag="[$1]" tab=$'\t' d f base key probs reason line desc n seen status last since
+  local projects plist np age area sym ack out cnt oldest newest tss expected actual owner
+  PROFILE="$prof"
+  PDIR="$(cd -P "$STORE_HOME/$prof" && pwd -P)"
+
+  ack="$(read_ack)"
+  out="$(inbox_stream compact "" "$ack" "" "")"
+  if [ -n "$out" ]; then
+    cnt="$(printf '%s\n' "$out" | grep -c '')"
+    tss="$(printf '%s\n' "$out" | awk '{ print $1 }' | LC_ALL=C sort)"
+    oldest="$(printf '%s\n' "$tss" | sed -n '1p')"
+    newest="$(printf '%s\n' "$tss" | tail -n 1)"
+    D_UNACKED_N=$((D_UNACKED_N + cnt))
+    dream_add D_UNACKED "  $tag $cnt event(s), oldest $oldest, newest $newest"
+  fi
+
+  for d in candidates applied rejected; do
+    for f in "$PDIR/$d"/*.md; do
+      [ -e "$f" ] || continue
+      base="${f##*/}"
+      key="${base%.md}"
+      probs="$(entry_problems "$f")"
+      if [ -n "$probs" ]; then
+        reason="$(printf '%s\n' "$probs" | while IFS= read -r line; do printf '%s; ' "${line%": $f"}"; done)"
+        dream_add D_UNUSABLE "  $tag $d/$base — ${reason%; }"
+        continue
+      fi
+      desc="$(fm_get "$f" description)"
+      n="$(char_len "$desc")"
+      if [ "$n" -gt 120 ]; then dream_add D_HYGIENE "  $tag long description ($n chars): $d/$base"; fi
+      if valid_key "$key"; then
+        area="${key%%.*}"
+        if ! in_list "$area" "$AREAS"; then dream_add D_HYGIENE "  $tag unknown area '$area': $d/$base"; fi
+      else
+        dream_add D_HYGIENE "  $tag bad key (expected <area>.<symptom>): $d/$base"
+      fi
+      if [ "$d" = applied ]; then
+        owner="$(fm_get "$f" owner)"
+        if [ -z "$owner" ]; then dream_add D_HYGIENE "  $tag applied without owner: $d/$base"; fi
+      fi
+      [ "$d" = candidates ] || continue
+
+      if [ -f "$PDIR/INDEX.md" ] && ! grep -qF "](candidates/$base)" "$PDIR/INDEX.md"; then
+        dream_add D_UNUSABLE "  $tag $d/$base — not in INDEX.md"
+      fi
+      sym="${key#*.}"
+      D_ROWS="$D_ROWS$prof$tab$key$tab$(oneline "$sym $desc")"$'\n'
+
+      seen="$(fm_get "$f" seen)"
+      seen=$((10#$seen))
+      status="$(fm_get "$f" status)"
+      last="$(fm_get "$f" last-seen)"
+      projects="$(fm_get "$f" projects)"
+      plist="${projects#\[}"; plist="${plist%\]}"
+      np="$(printf '%s' "$plist" | tr ',' '\n' | awk 'NF { c++ } END { print c + 0 }')"
+      case "$status" in
+        candidate)
+          if { [ "$seen" -ge 3 ] || { [ "$seen" -ge 2 ] && [ "$np" -ge 2 ]; }; } \
+             && ! grep -q '^## Proposal' "$f"; then
+            owner="$(fm_get "$f" suggested-owner)"
+            line="  $tag $key — seen $seen, projects: ${plist:-none}"
+            if [ -n "$owner" ]; then line="$line, suggested-owner: $owner"; fi
+            dream_add D_READY "$line"
+          fi
+          if [ "$seen" -eq 1 ]; then
+            age=$((today_days - $(days_from_civil "$last")))
+            if [ "$age" -gt "$stale_days" ]; then
+              dream_add D_STALE "  $tag $key — seen 1, last-seen $last (${age}d idle)"
+            fi
+          fi ;;
+        proposed)
+          since="$(fm_get "$f" proposed-at)"
+          valid_calendar_date "$since" || since="$last"
+          age=$((today_days - $(days_from_civil "$since")))
+          if [ "$age" -gt 14 ]; then
+            dream_add D_PROPOSED "  $tag $key — proposed $since (${age}d ago), waiting for a user decision"
+          fi ;;
+      esac
+    done
+  done
+
+  if [ -f "$PDIR/INDEX.md" ]; then
+    expected="$(render_index 2>/dev/null || true)"
+    actual="$(<"$PDIR/INDEX.md")"
+    if [ "$expected" != "$actual" ]; then dream_add D_UNUSABLE "  $tag INDEX.md — index drift (differs from candidates/)"; fi
+  else
+    dream_add D_UNUSABLE "  $tag INDEX.md — missing"
+  fi
+}
+
+dream_report() {   # dream_report <stale-days> [<profile>]
+  local stale_days="$1" only="${2:-}" day today_days prof profs
+  load_store
+  day="$(today)"
+  today_days="$(days_from_civil "$day")"
+  D_UNACKED="" D_UNACKED_N=0 D_ROWS="" D_READY="" D_PROPOSED="" D_STALE="" D_UNUSABLE="" D_HYGIENE=""
+  profs="$(dream_profiles "$only")"
+  if [ -n "$only" ] && [ -z "$profs" ]; then die "no such profile in the store: $only"; fi
+  while IFS= read -r prof; do
+    [ -n "$prof" ] || continue
+    dream_scan_profile "$prof" "$stale_days" "$today_days"
+  done <<< "$profs"
+
+  local similar=""
+  if [ -n "$D_ROWS" ]; then
+    similar="$(printf '%s' "$D_ROWS" | LC_ALL=C sort | dream_pairs)"
+  fi
+
+  dream_emit "unacked inbox (triage, then 'learn ack --profile <p> --until <ts>'):" "$D_UNACKED"
+  dream_emit "similar candidates (merge, or confirm they differ):" "$similar"
+  dream_emit "ready for proposal (threshold met, no ## Proposal section):" "$D_READY"
+  dream_emit "proposed without decision (older than 14 days — needs the user):" "$D_PROPOSED"
+  dream_emit "stale (seen 1, older than $stale_days days — reject or keep):" "$D_STALE"
+  dream_emit "unusable (fix frontmatter / run 'learn index'):" "$D_UNUSABLE"
+  dream_emit "hygiene:" "$D_HYGIENE"
+
+  local a c e f g h
+  a="$D_UNACKED_N"
+  c="$(dream_count "$similar")"
+  e="$(dream_count "$D_READY")"
+  f="$(dream_count "$D_STALE")"
+  g="$(dream_count "$D_UNUSABLE")"
+  h=$(( $(dream_count "$D_PROPOSED") + $(dream_count "$D_HYGIENE") ))
+  if [ $((a + c + e + f + g + h)) -eq 0 ]; then
+    echo "dream: learnings are tidy — nothing to consolidate"
+  else
+    echo "dream: $a unacked, $c similar, $e ready, $f stale, $g unusable"
+  fi
+}
+
+# Replace every __NAME__ placeholder of a template. Placeholder values were
+# checked for JSON-unsafe characters by the caller. Plain literal replacement
+# in awk: bash's ${text//pat/rep} is quadratic on bash 3.2 (macOS) in a UTF-8
+# locale (a 40 KB config took over a minute), and '&' in a value would be
+# special with patsub_replacement (bash 5.2+).
+dream_render() {   # dream_render <template> <store> <learn-bin> <home>
+  printf '%s\n' "$1" | R_STORE="$2" R_BIN="$3" R_HOME="$4" LC_ALL=C awk '
+    function rep(s, from, to,   out, i) {
+      out = ""
+      while ((i = index(s, from)) > 0) {
+        out = out substr(s, 1, i - 1) to
+        s = substr(s, i + length(from))
+      }
+      return out s
+    }
+    {
+      $0 = rep($0, "__STORE__", ENVIRON["R_STORE"])
+      $0 = rep($0, "__LEARN_BIN__", ENVIRON["R_BIN"])
+      $0 = rep($0, "__HOME__", ENVIRON["R_HOME"])
+      print
+    }
+  '
+}
+
+# Stage everything and commit; returns 1 when there was nothing to commit.
+dream_commit() {   # dream_commit <message>
+  git -C "$STORE_HOME" add -A
+  if git -C "$STORE_HOME" diff --cached --quiet 2>/dev/null \
+     && git -C "$STORE_HOME" rev-parse -q --verify HEAD >/dev/null 2>&1; then
+    return 1
+  fi
+  git -C "$STORE_HOME" commit -q -m "$1" \
+    || die "commit failed in $STORE_HOME — is git user.name / user.email configured?"
+}
+
+# Last non-empty line of the agent's output, if it looks like the requested
+# summary ("summary: triaged …" / "triaged …"); empty otherwise.
+dream_summary_line() {   # dream_summary_line <output-file>
+  local line lower
+  line="$(LC_ALL=C sed $'s/\x1b\\[[0-9;]*[A-Za-z]//g' "$1" | awk 'NF { l = $0 } END { print l }')"
+  line="$(oneline "$line")"
+  lower="$(printf '%s' "$line" | tr '[:upper:]' '[:lower:]')"
+  case "$lower" in
+    "summary:"*) line="${line#*:}" ;;
+    "dream:"*) line="${line#*:}" ;;
+    "triaged "*) ;;
+    *) return 0 ;;
+  esac
+  line="$(oneline "$line")"
+  printf '%s' "${line:0:120}"
+}
+
+cmd_dream() {
+  local usage="usage: learn dream [--report [--stale-days N]] [--profile <p>] [--model <provider/model>] [--if-changed] [--print-config]"
+  # AGENT_LEARNINGS_DREAM_MODEL sets the default model; --model overrides it.
+  local report=0 stale_days="" profile="" model="${AGENT_LEARNINGS_DREAM_MODEL:-}" print_config=0 model_flag=0 if_changed=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --report) report=1; shift ;;
+      --print-config) print_config=1; shift ;;
+      --if-changed) if_changed=1; shift ;;
+      --stale-days)
+        [ $# -ge 2 ] || die "$usage"
+        case "$2" in ''|*[!0-9]*) die "$usage" ;; esac
+        [ "$((10#$2))" -gt 0 ] || die "$usage"
+        stale_days="$((10#$2))"; shift 2 ;;
+      --profile)
+        [ $# -ge 2 ] || die "$usage"
+        profile="$2"; shift 2 ;;
+      --model)
+        [ $# -ge 2 ] && [ -n "$2" ] || die "$usage"
+        model="$2"; model_flag=1; shift 2 ;;
+      *) die "$usage" ;;
+    esac
+  done
+  if [ "$report" -eq 1 ]; then
+    { [ "$model_flag" -eq 0 ] && [ "$print_config" -eq 0 ] && [ "$if_changed" -eq 0 ]; } || die "$usage"
+  else
+    [ -z "$stale_days" ] || die "$usage"
+  fi
+  [ -n "$stale_days" ] || stale_days=90
+
+  load_store
+  if [ -n "$profile" ]; then
+    require_slug "profile name" "$profile"
+    [ -d "$STORE_HOME/$profile" ] || die "no such profile in the store: $profile"
+  fi
+
+  if [ "$report" -eq 1 ]; then
+    dream_report "$stale_days" "$profile"
+    return 0
+  fi
+
+  local assets config prompt nlchar=$'\n' bs=$'\\' quote='"' bad
+  assets="$SKILL_DIR/dream"
+  [ -f "$assets/opencode.json" ] && [ -f "$assets/prompt.md" ] || die "dream assets not found in $assets"
+  for bad in "$STORE_HOME" "$HOME" "$SCRIPT_PATH"; do
+    case "$bad" in
+      *"$quote"*|*"$bs"*|*"$nlchar"*) die "cannot run dream: path contains a quote, backslash or newline: $bad" ;;
+    esac
+  done
+  config="$(<"$assets/opencode.json")"
+  prompt="$(<"$assets/prompt.md")"
+  config="$(dream_render "$config" "$STORE_HOME" "$SCRIPT_PATH" "$HOME")"
+  prompt="$(dream_render "$prompt" "$STORE_HOME" "$SCRIPT_PATH" "$HOME")"
+  [ -z "$profile" ] || prompt="$prompt${nlchar}${nlchar}Profile scope: $profile (pass --profile $profile to every learn command)"
+
+  if [ "$print_config" -eq 1 ]; then
+    printf '%s\n' "$config"
+    return 0
+  fi
+
+  [ -d "$STORE_HOME/.git" ] || die "store at $STORE_HOME is not a git repository (ask the user to run: learn init <profile>)"
+  command -v opencode >/dev/null 2>&1 || die "opencode not found on PATH"
+
+  # .dream-last is local bookkeeping: keep it out of the store's commits.
+  mkdir -p "$STORE_HOME/.git/info"
+  if ! grep -qxF '/.dream-last' "$STORE_HOME/.git/info/exclude" 2>/dev/null; then
+    printf '/.dream-last\n' >> "$STORE_HOME/.git/info/exclude"
+  fi
+
+  # Commit pending changes first so the dream result is its own revertable commit.
+  if [ -n "$(git -C "$STORE_HOME" status --porcelain --untracked-files=all)" ]; then
+    dream_commit "learn: pre-dream snapshot" || true
+    echo "dream: committed pending store changes first"
+  fi
+  local pre="" last=""
+  pre="$(git -C "$STORE_HOME" rev-parse -q --verify HEAD 2>/dev/null || true)"
+
+  # --if-changed: skip when no commit touched candidates/inbox/applied/rejected
+  # since the sha stored in .dream-last, so a nightly job costs nothing on quiet days.
+  if [ "$if_changed" -eq 1 ] && [ -n "$pre" ] && [ -f "$STORE_HOME/.dream-last" ]; then
+    IFS= read -r last < "$STORE_HOME/.dream-last" || true
+    if [ -n "$last" ] && git -C "$STORE_HOME" cat-file -e "$last^{commit}" 2>/dev/null \
+       && [ -z "$(git -C "$STORE_HOME" diff --name-only "$last" "$pre" -- '*/candidates/*' '*/inbox/*' '*/applied/*' '*/rejected/*')" ]; then
+      echo "dream: nothing changed in candidates/inbox/applied/rejected since the last run — skipping"
+      return 0
+    fi
+  fi
+
+  # AGENT_LEARNINGS_HOME is pinned so the agent's `learn` calls see this store
+  # even when the caller passed a relative path.
+  local outfile rc=0
+  outfile="$(mktemp "${TMPDIR:-/tmp}/learn-dream.XXXXXX")" || die "cannot create temporary file"
+  set +e
+  (cd "$STORE_HOME" && AGENT_LEARNINGS_HOME="$STORE_HOME" OPENCODE_CONFIG_CONTENT="$config" \
+    opencode run --standalone --agent learn-dream \
+    ${model:+--model "$model"} "$prompt") | tee "$outfile"
+  rc=${PIPESTATUS[0]}
+  set -e
+  if [ "$rc" -ne 0 ]; then
+    rm -f "$outfile"
+    die "opencode run failed (exit $rc); store changes, if any, are left uncommitted for review"
+  fi
+
+  local summary p
+  summary="$(dream_summary_line "$outfile")"
+  rm -f "$outfile"
+  [ -n "$summary" ] || summary="consolidated"
+
+  # Rebuild every profile's INDEX.md before the final commit.
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    PROFILE_OVERRIDE="$p"
+    resolve_profile
+    write_index
+  done <<< "$(dream_profiles "")"
+  PROFILE_OVERRIDE=""
+
+  local committed=0
+  if dream_commit "learn: dream — $summary"; then committed=1; fi
+  if git -C "$STORE_HOME" rev-parse -q --verify HEAD >/dev/null 2>&1; then
+    git -C "$STORE_HOME" rev-parse HEAD > "$STORE_HOME/.dream-last"
+  fi
+
+  if [ "$committed" -eq 1 ]; then
+    echo "dream: committed — $summary"
+    echo "undo: git -C $STORE_HOME revert HEAD"
+  else
+    echo "dream: no changes"
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # backup / install
 # ---------------------------------------------------------------------------
 
@@ -1146,12 +1629,22 @@ cmd_install_opencode() {
 main() {
   local cmd="${1:-}"
   if [ $# -gt 0 ]; then shift; fi
+  # `--profile <p>` as the first argument addresses a store profile directly
+  # (the dream agent runs in the store root, where there is no ./.learnings).
+  case "$cmd" in
+    inbox|ack|add|bump|propose|apply|reject|index|status|doctor|grep|prune)
+      if [ "${1:-}" = "--profile" ]; then
+        [ $# -ge 2 ] && [ -n "$2" ] || die "--profile requires a value"
+        PROFILE_OVERRIDE="$2"
+        shift 2
+      fi ;;
+  esac
   case "$cmd" in
     init) cmd_init "$@" ;; inbox) cmd_inbox "$@" ;; ack) cmd_ack "$@" ;;
     add) cmd_add "$@" ;; bump) cmd_bump "$@" ;; propose) cmd_propose "$@" ;;
     apply) cmd_apply "$@" ;; reject) cmd_reject "$@" ;; index) cmd_index "$@" ;;
     status) cmd_status "$@" ;; doctor) cmd_doctor "$@" ;; grep) cmd_grep "$@" ;;
-    prune) cmd_prune "$@" ;; markers) cmd_markers "$@" ;;
+    prune) cmd_prune "$@" ;; markers) cmd_markers "$@" ;; dream) cmd_dream "$@" ;;
     backup) cmd_backup "$@" ;; install-opencode) cmd_install_opencode "$@" ;;
     -v|--version) [ $# -eq 0 ] || die "usage: learn --version"; echo "learn $VERSION" ;;
     -h|--help|help) [ $# -eq 0 ] || die "usage: learn help"; usage ;;
