@@ -154,6 +154,8 @@ test("sandbox simulation: --from drafts and plain commands allowed, free text an
       `${bin} reject --profile work --from .drafts/draft.md`,
       `${bin} ack --profile work --until 2026-09-30T12:00:00Z`,
       `${bin} inbox --profile work --limit 200`,
+      `${bin} help`,
+      `${bin} --help`,
     ]) {
       assert.equal(shellDecision(rules, pre + cmd), "allow", `allowed: ${pre}${cmd}`);
     }
