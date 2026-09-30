@@ -99,8 +99,15 @@ export function loadMarkers(defaultPath, personalPath) {
   return compileMarkers(readJson(defaultPath), readJson(personalPath))
 }
 
+// `opencode run "..."` and pasted quotes wrap the whole message; anchors must see the real start.
+export function stripWrappingQuotes(text) {
+  const value = String(text ?? "").trim()
+  const wrapped = value.match(/^(["'«„“])([\s\S]*)(["'»“”])$/)
+  return wrapped ? wrapped[2].trim() : value
+}
+
 export function normalize(text) {
-  return String(text ?? "").trim().slice(0, MATCH_WINDOW).toLowerCase()
+  return stripWrappingQuotes(text).slice(0, MATCH_WINDOW).toLowerCase()
 }
 
 // Order: strong → medium → weak → confirmation.
@@ -199,7 +206,8 @@ function failureHead(text, re) {
 // `result.output` or `result.metadata`.
 function numericExit(result) {
   if (!result || typeof result !== "object") return undefined
-  for (const candidate of [result.exit, result.output?.exit, result.metadata?.exit]) {
+  // Observed on OpenCode v2.0.20: result.metadata.metadata.exit (shell tool).
+  for (const candidate of [result.exit, result.output?.exit, result.metadata?.exit, result.metadata?.metadata?.exit]) {
     if (Number.isInteger(candidate)) return candidate
   }
   return undefined
@@ -228,6 +236,9 @@ export function detectToolFailure(ev) {
       const last = lastNonEmptyLine(text)
       return { tool, head: last ? `exit ${exit}: ${last}` : `exit ${exit}` }
     }
+    // A known zero exit is authoritative: never pattern-scan successful output
+    // (it may legitimately contain "Traceback", "Error:", or an "exit code" string).
+    if (exit === 0) return undefined
   }
   if (!text) return undefined
   for (const re of isBash ? BASH_PATTERNS : EDIT_PATTERNS) {

@@ -168,3 +168,13 @@ test("validateMarkers: accepts shipped defaults, reports bad shape and bad regex
   assert.ok(validateMarkers({ version: 1, correction: { strong: ["("] } }).some((e) => e.includes("invalid regex")))
   assert.ok(validateMarkers({ version: 1, correction: { strong: "x" } }).some((e) => e.includes("must be an array")))
 })
+
+test("matchMarkers: strips a wrapping quote pair so ^ anchors see the real start", async () => {
+  const { matchMarkers, loadMarkers } = await import("../skills/self-improving/opencode/learn-core.js")
+  const here = dirname(fileURLToPath(import.meta.url))
+  const mk = loadMarkers(join(here, "../skills/self-improving/opencode/markers.default.json"))
+  assert.equal(matchMarkers('"Нет, я про другое"', mk)?.tier, "strong")
+  assert.equal(matchMarkers("«Откати всё»", mk)?.tier, "strong")
+  // Unbalanced or inner quotes are left alone.
+  assert.equal(matchMarkers('"quoted" не так', mk)?.tier, "strong")
+})

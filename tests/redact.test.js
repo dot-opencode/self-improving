@@ -129,3 +129,25 @@ test("inboxLine is a single JSON line", () => {
   assert.equal(line.trim().split("\n").length, 1)
   assert.deepEqual(JSON.parse(line), { a: "x\ny" })
 })
+
+// Real payload observed on OpenCode v2.0.20 (`shell` tool, status completed).
+const V2_SHELL = (exit, text) => ({
+  tool: "shell",
+  status: "completed",
+  result: {
+    output: text,
+    title: "shell",
+    metadata: {
+      metadata: { status: "completed", truncated: false, exit },
+      content: [{ type: "text", text }, { type: "text", text: `Exited with code ${exit}` }],
+    },
+  },
+})
+
+test("detectToolFailure: real v2.0.20 shell payload — exit 3 captured, exit 0 never scanned", async () => {
+  const { detectToolFailure } = await import("../skills/self-improving/opencode/learn-core.js")
+  assert.deepEqual(detectToolFailure(V2_SHELL(3, "boom\n")), { tool: "shell", head: "exit 3: boom" })
+  // Successful command whose output merely *contains* failure-looking text (e.g. grep over source).
+  const noisy = 'sed -n: 189-  if (/Traceback/.test(hit)) {\nError: handling code\n"Exited with code 3" in a string\n'
+  assert.equal(detectToolFailure(V2_SHELL(0, noisy)), undefined)
+})

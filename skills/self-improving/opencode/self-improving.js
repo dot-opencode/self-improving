@@ -11,6 +11,7 @@ import {
   detectToolFailure,
   inboxLine,
   loadMarkers,
+  stripWrappingQuotes,
   matchMarkers,
   redact,
   shouldCapture,
@@ -113,6 +114,7 @@ export default {
         messages: new Set(),
         texts: new Set(),
       }
+      if (!cached) state.userCount = await priorUserMessages(sessionID)
       state.checkedAt = Date.now()
       state.directory = directory
       state.isSubagent = Boolean(info?.parentID)
@@ -128,6 +130,22 @@ export default {
       }
       rememberSession(sessionID, state)
       return state.inert ? undefined : state
+    }
+
+    // The in-memory counter resets with the process (restart, `opencode run --standalone`),
+    // so seed it from the session's existing user messages. The prompt hook runs before
+    // admission, so the count is of *prior* messages. Any failure → 0 (treat as new session).
+    async function priorUserMessages(sessionID) {
+      try {
+        const entries = await ctx.session.context?.({ sessionID })
+        if (!Array.isArray(entries)) return 0
+        const count = entries.filter((entry) => entry?.type === "user" || entry?.role === "user" || entry?.info?.role === "user").length
+        debug("seeded userCount", { session: sessionID, count, sample: entries[0] ? Object.keys(entries[0]) : [] })
+        return count
+      } catch (error) {
+        debug("session.context failed", { error: String(error) })
+        return 0
+      }
     }
 
     async function writeEvent(state, event) {
@@ -193,7 +211,7 @@ export default {
           kind: match.role,
           tier: match.tier,
           marker: match.marker,
-          snippet: redact(text),
+          snippet: redact(stripWrappingQuotes(text)),
           project: state.project,
           session: sessionID,
         }
