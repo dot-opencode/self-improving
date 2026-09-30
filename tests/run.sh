@@ -590,6 +590,12 @@ cat > "$STUBBIN/opencode" <<'EOF'
   printf 'home=%s\n' "$AGENT_LEARNINGS_HOME"
   printf 'args=%s\n' "$*"
   printf 'config=%s\n' "$OPENCODE_CONFIG_CONTENT"
+  printf 'db=%s\n' "$OPENCODE_DB"
+  if [ -e "$OPENCODE_DB" ] || [ -e "$OPENCODE_DB-wal" ] || [ -e "$OPENCODE_DB-shm" ]; then
+    echo "db-existed=yes"
+  else
+    echo "db-existed=no"
+  fi
 } > "$STUB_LOG"
 printf '\nstub touched\n' >> "$AGENT_LEARNINGS_HOME/work/candidates/git.commit-scope.md"
 mkdir -p "$AGENT_LEARNINGS_HOME/.drafts"
@@ -617,8 +623,19 @@ export STUB_LOG="$TMP/stub.log"
 "$LEARN" index --profile work >/dev/null 2>&1   # store is dirty (uncommitted fixture) -> pre-dream snapshot
 git -C "$DSTORE" config user.name t; git -C "$DSTORE" config user.email t@example.invalid
 PRE_COMMITS="$(git -C "$DSTORE" rev-list --count HEAD 2>/dev/null || echo 0)"
+# --report / --print-config must not touch an existing dream DB
+echo stale > "$DSTORE/.git/learn-dream.db"
+echo stale > "$DSTORE/.git/learn-dream.db-wal"
+run dream --report
+check "dream --report keeps .git/learn-dream.db" test -e "$DSTORE/.git/learn-dream.db"
+run dream --print-config
+check "dream --print-config keeps .git/learn-dream.db" test -e "$DSTORE/.git/learn-dream.db"
 OUT="$(PATH="$STUBBIN:$PATH" "$LEARN" dream --model prov/model-x 2>&1)"; RC=$?
 if [ "$RC" -eq 0 ]; then pass "dream with stub opencode exits 0"; else fail "dream with stub opencode" "exit $RC: $OUT"; fi
+check "stub got OPENCODE_DB in store .git" grep -qxF "db=$DSTORE/.git/learn-dream.db" "$STUB_LOG"
+check "stale dream db removed before the run" grep -qxF "db-existed=no" "$STUB_LOG"
+expect_contains "dream prints session transcript location" "session transcript in"
+check "dream db never shows in git status" test -z "$(git -C "$DSTORE" status --porcelain --untracked-files=all | grep 'learn-dream\.db')"
 expect_contains "dream prints undo hint" "undo: git -C $DSTORE revert HEAD"
 SUBJECTS="$(git -C "$DSTORE" log --format=%s)"
 if [[ "$SUBJECTS" == *"learn: pre-dream snapshot"* ]]; then pass "dream made pre-dream snapshot commit"; else fail "pre-dream snapshot" "$SUBJECTS"; fi

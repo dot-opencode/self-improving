@@ -1668,9 +1668,14 @@ cmd_dream() {
   local outfile rc=0
   # The agent writes free text to .drafts/draft.md; do not rely on its write tool creating the dir.
   mkdir -p "$STORE_HOME/.drafts"
+  # The unattended session lives in its own OpenCode database (inside .git: never
+  # committed), so it never shows up in the user's OpenCode session list. It holds
+  # the latest run only.
+  local db="$STORE_HOME/.git/learn-dream.db"
+  rm -f "$db" "$db-wal" "$db-shm"
   outfile="$(mktemp "${TMPDIR:-/tmp}/learn-dream.XXXXXX")" || die "cannot create temporary file"
   set +e
-  (cd "$STORE_HOME" && AGENT_LEARNINGS_HOME="$STORE_HOME" OPENCODE_CONFIG_CONTENT="$config" \
+  (cd "$STORE_HOME" && AGENT_LEARNINGS_HOME="$STORE_HOME" OPENCODE_CONFIG_CONTENT="$config" OPENCODE_DB="$db" \
     opencode run --standalone --agent learn-dream \
     ${model:+--model "$model"} "$prompt") | tee "$outfile"
   rc=${PIPESTATUS[0]}
@@ -1680,6 +1685,7 @@ cmd_dream() {
     die "opencode run failed (exit $rc); store changes, if any, are left uncommitted for review"
   fi
 
+  echo "dream: session transcript in $db (latest run only)"
   local summary p
   summary="$(dream_summary_line "$outfile")"
   rm -f "$outfile"

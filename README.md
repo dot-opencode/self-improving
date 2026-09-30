@@ -14,6 +14,9 @@ script, a skill patch, a new skill, or (as a suggestion only) an `AGENTS.md` lin
   into sessions; the `self-improving` skill presents them at a natural pause and
   applies one only after user approval. In-session triage of the inbox happens
   only when you ask for it ("разбери inbox", `/learn`).
+  The unattended dream run uses its own OpenCode database at
+  `<store>/.git/learn-dream.db`, which holds the latest run only, so dream sessions
+  never show up in OpenCode's session list. Inspect it with `sqlite3`.
 - Once applied, the lesson lives in its owner — not in context — and the candidate
   stops growing.
 
