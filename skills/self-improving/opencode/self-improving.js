@@ -1,8 +1,8 @@
 import { spawn as nodeSpawn } from "node:child_process"
 import { realpathSync } from "node:fs"
-import { appendFile, mkdir, readdir, readFile, readlink } from "node:fs/promises"
+import { appendFile, mkdir, readdir, readFile, readlink, realpath } from "node:fs/promises"
 import { homedir } from "node:os"
-import { basename, dirname, join, resolve } from "node:path"
+import { basename, dirname, join, resolve, sep } from "node:path"
 import { fileURLToPath } from "node:url"
 
 import {
@@ -27,6 +27,9 @@ const defaultMarkersPath = join(moduleDirectory, "markers.default.json")
 
 const BACKUP_EVENTS = new Set(["session.execution.succeeded", "session.execution.failed", "session.execution.interrupted"])
 const INERT_RECHECK_MS = 10_000
+const SESSIONS_CAP = 200
+const DEDUPE_CAP = 500
+const PROFILE_RE = /^[a-z0-9][a-z0-9-]*$/
 
 const debugEnabled = () => process.env.SELF_IMPROVING_DEBUG === "1"
 
@@ -44,15 +47,49 @@ export default {
     const cli = deps.learnCli ?? learnCli
     const controller = new AbortController()
     const sessions = new Map()
-    const backups = new Map()
+    let backupInFlight
 
-    function debug(message, extra) {
-      if (!debugEnabled()) return
+    function log(message, extra) {
       try {
         if (ctx.log?.error) void Promise.resolve(ctx.log.error({ service: "self-improving", message, ...extra })).catch(() => {})
         else console.error("[self-improving]", message, extra ?? "")
       } catch {
         // Logging must not interrupt OpenCode hooks.
+      }
+    }
+
+    function debug(message, extra) {
+      if (debugEnabled()) log(message, extra)
+    }
+
+    // Dedupe sets are bounded: start over once a set grows past the cap.
+    function addBounded(set, value) {
+      if (set.size >= DEDUPE_CAP) set.clear()
+      set.add(value)
+    }
+
+    function rememberSession(sessionID, state) {
+      if (!sessions.has(sessionID) && sessions.size >= SESSIONS_CAP) {
+        const oldest = sessions.keys().next().value
+        sessions.delete(oldest)
+      }
+      sessions.set(sessionID, state)
+    }
+
+    // Same rules as the CLI: profile name must be a plain slug and the symlink
+    // must resolve inside the store root.
+    async function resolveProfile(directory) {
+      try {
+        const link = join(directory, ".learnings")
+        const profile = basename(await readlink(link))
+        if (!PROFILE_RE.test(profile)) return undefined
+        const root = await realpath(storeRoot)
+        const resolved = await realpath(link)
+        if (!resolved.startsWith(root + sep)) return undefined
+        return profile
+      } catch {
+        // No `.learnings` symlink (or dangling): stay inert.
+        return undefined
       }
     }
 
@@ -70,9 +107,7 @@ export default {
         inert: true,
         checkedAt: 0,
         userCount: 0,
-        seq: 0,
-        lastToolSeq: 0,
-        lastPromptSeq: 0,
+        toolSinceLastPrompt: false,
         lastTool: undefined,
         heads: new Set(),
         messages: new Set(),
@@ -84,19 +119,14 @@ export default {
       state.project = directory ? basename(directory) : undefined
       state.inert = true
       if (directory) {
-        try {
-          const target = await readlink(join(directory, ".learnings"))
-          const profile = basename(target)
-          if (profile) {
-            state.profile = profile
-            state.dir = join(storeRoot, profile)
-            state.inert = false
-          }
-        } catch {
-          // No `.learnings` symlink: stay inert.
+        const profile = await resolveProfile(directory)
+        if (profile) {
+          state.profile = profile
+          state.dir = join(storeRoot, profile)
+          state.inert = false
         }
       }
-      sessions.set(sessionID, state)
+      rememberSession(sessionID, state)
       return state.inert ? undefined : state
     }
 
@@ -111,13 +141,13 @@ export default {
         debug("execute.after", { status: ev?.status, tool: ev?.tool })
         const state = await sessionState(ev?.sessionID)
         if (!state) return
-        state.lastToolSeq = ++state.seq
+        state.toolSinceLastPrompt = true
         state.lastTool = ev.tool
         const failure = detectToolFailure(ev)
         if (!failure) return
         const head = redact(failure.head)
         if (!head || state.heads.has(head)) return
-        state.heads.add(head)
+        addBounded(state.heads, head)
         await writeEvent(state, {
           ts: timestamp(),
           kind: "failure",
@@ -138,23 +168,25 @@ export default {
         if (!state) return
         if (ev.messageID) {
           if (state.messages.has(ev.messageID)) return
-          state.messages.add(ev.messageID)
+          addBounded(state.messages, ev.messageID)
         }
         const text = typeof ev.prompt?.text === "string" ? ev.prompt.text : ""
         state.userCount += 1
         const isFirstMessage = state.userCount === 1
-        const prevWasToolAction = state.lastToolSeq > state.lastPromptSeq
+        const prevWasToolAction = state.toolSinceLastPrompt
         const prevTool = state.lastTool
-        state.lastPromptSeq = ++state.seq
+        state.toolSinceLastPrompt = false
         debug("prompt", { session: sessionID, first: isFirstMessage, length: text.length })
 
         const markers = loadMarkers(defaultMarkersPath, join(storeRoot, "markers.json"))
         const match = matchMarkers(text, markers)
+        // shouldCapture rejects confirmations: the plugin only records corrections.
         if (!shouldCapture({ text, isFirstMessage, isSubagent: state.isSubagent, prevWasToolAction, match })) return
+        if (match.role === "confirmation") return
 
         const verbatim = text.trim().toLowerCase()
         if (state.texts.has(verbatim)) return
-        state.texts.add(verbatim)
+        addBounded(state.texts, verbatim)
 
         const event = {
           ts: timestamp(),
@@ -181,9 +213,14 @@ export default {
       } catch {
         // No ack marker: everything is unprocessed.
       }
+      const ackDay = ack > 0 ? new Date(ack).toISOString().slice(0, 10) : undefined
       let files
       try {
-        files = (await readdir(inbox)).filter((name) => name.endsWith(".jsonl"))
+        files = (await readdir(inbox)).filter((name) => {
+          if (!name.endsWith(".jsonl")) return false
+          // Files named YYYY-MM-DD older than the ack day hold only acked events.
+          return !(ackDay && /^\d{4}-\d{2}-\d{2}\.jsonl$/.test(name) && name.slice(0, 10) < ackDay)
+        })
       } catch {
         return 0
       }
@@ -213,7 +250,7 @@ export default {
         if (!Array.isArray(ev?.system)) return
         if (ev.system.some((part) => typeof part?.text === "string" && part.text.includes(OPEN))) return
         const state = await sessionState(ev.sessionID)
-        if (!state) return
+        if (!state || state.isSubagent) return
         let index = ""
         try {
           index = await readFile(join(state.dir, "INDEX.md"), "utf8")
@@ -254,9 +291,12 @@ export default {
         const state = await sessionState(sessionID)
         if (!state || controller.signal.aborted) return
         const directory = state.directory
-        if (backups.has(directory)) return
-        const pending = runBackup(directory).finally(() => backups.delete(directory))
-        backups.set(directory, pending)
+        // One in-flight backup per store root, regardless of project directory.
+        if (backupInFlight) return
+        const pending = runBackup(directory).finally(() => {
+          if (backupInFlight === pending) backupInFlight = undefined
+        })
+        backupInFlight = pending
         await pending
       } catch (error) {
         debug("backup failed", { error: String(error), sessionID })
@@ -268,7 +308,7 @@ export default {
       await ctx.session.hook("prompt", onPrompt)
       await ctx.session.hook("context", onContext)
     } catch (error) {
-      debug("hook registration failed", { error: String(error) })
+      log("hook registration failed", { error: String(error) })
     }
 
     void (async () => {
@@ -276,6 +316,11 @@ export default {
         if (controller.signal.aborted) break
         if (!event) continue
         debug("event", { type: event.type })
+        if (event.type === "session.deleted") {
+          const id = event.data?.sessionID ?? event.data?.info?.id
+          if (id) sessions.delete(id)
+          continue
+        }
         if (!BACKUP_EVENTS.has(event.type)) continue
         const sessionID = event.data?.sessionID
         if (sessionID) void backup(sessionID)

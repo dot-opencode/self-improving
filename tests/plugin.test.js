@@ -21,15 +21,19 @@ function fixture({ learnings = true, parentID } = {}) {
 function fakeCtx(fx) {
   const hooks = {}
   const queue = []
+  const getCalls = []
   let wake
   const ctx = {
     tool: { hook: async (name, fn) => void (hooks[`tool:${name}`] = fn) },
     session: {
       hook: async (name, fn) => void (hooks[`session:${name}`] = fn),
-      get: async ({ sessionID }) => ({
-        parentID: sessionID === "ses_sub" ? "ses_parent" : undefined,
-        location: { directory: fx.project },
-      }),
+      get: async ({ sessionID }) => {
+        getCalls.push(sessionID)
+        return {
+          parentID: sessionID === "ses_sub" ? "ses_parent" : undefined,
+          location: { directory: fx.dirs?.[sessionID] ?? fx.project },
+        }
+      },
     },
     event: {
       subscribe({ signal }) {
@@ -51,6 +55,7 @@ function fakeCtx(fx) {
   return {
     ctx,
     hooks,
+    getCalls,
     emit(event) {
       queue.push(event)
       wake?.()
@@ -261,6 +266,195 @@ test("cleanup aborts subscription", async () => {
     await tick()
     assert.equal(p.calls.length, 0)
   } finally {
+    rmSync(fx.root, { recursive: true, force: true })
+  }
+})
+
+test("confirmations are never written by the plugin", async () => {
+  const fx = fixture()
+  const p = await start(fx)
+  try {
+    await p.hooks["session:prompt"](prompt("ses_1", "m1", "hello"))
+    await p.hooks["tool:execute.after"]({ status: "completed", tool: "edit", sessionID: "ses_1", result: "ok" })
+    await p.hooks["session:prompt"](prompt("ses_1", "m2", "ок"))
+    await p.hooks["session:prompt"](prompt("ses_1", "m3", "LGTM"))
+    assert.equal(inboxEvents(fx).length, 0)
+  } finally {
+    p.cleanup()
+    rmSync(fx.root, { recursive: true, force: true })
+  }
+})
+
+test("structured bash exit failure is captured; read tool output is ignored", async () => {
+  const fx = fixture()
+  const p = await start(fx)
+  try {
+    await p.hooks["tool:execute.after"]({ status: "completed", tool: "bash", sessionID: "ses_1", result: { output: { exit: 2, output: "boom" } } })
+    await p.hooks["tool:execute.after"]({ status: "completed", tool: "read", sessionID: "ses_1", result: "Error: foo" })
+    const events = inboxEvents(fx)
+    assert.equal(events.length, 1)
+    assert.equal(events[0].head, "exit 2: boom")
+  } finally {
+    p.cleanup()
+    rmSync(fx.root, { recursive: true, force: true })
+  }
+})
+
+test("failure heads have home paths redacted", async () => {
+  const fx = fixture()
+  const p = await start(fx)
+  try {
+    await p.hooks["tool:execute.after"]({ status: "error", tool: "bash", sessionID: "ses_1", error: { message: "ENOENT open /Users/kurbezz/x" } })
+    assert.equal(inboxEvents(fx)[0].head, "ENOENT open ~/x")
+  } finally {
+    p.cleanup()
+    rmSync(fx.root, { recursive: true, force: true })
+  }
+})
+
+test("inert when .learnings escapes the store or has a bad profile name", async () => {
+  for (const kind of ["parent", "git", "outside"]) {
+    const fx = fixture({ learnings: false })
+    let target
+    if (kind === "parent") target = ".."
+    else if (kind === "git") {
+      target = join(fx.store, ".git")
+      mkdirSync(target, { recursive: true })
+    } else {
+      target = join(fx.root, "outside", "work")
+      mkdirSync(target, { recursive: true })
+    }
+    symlinkSync(target, join(fx.project, ".learnings"))
+    writeFileSync(join(fx.store, "work", "INDEX.md"), "- [a.b](candidates/a.b.md) — correction ×2: x\n")
+    const p = await start(fx)
+    try {
+      await p.hooks["session:prompt"](prompt("ses_1", "m1", "hello"))
+      await p.hooks["tool:execute.after"]({ status: "error", tool: "bash", sessionID: "ses_1", error: { message: "boom" } })
+      await p.hooks["session:prompt"](prompt("ses_1", "m2", "Нет, я про другое"))
+      const ev = { sessionID: "ses_1", system: [] }
+      await p.hooks["session:context"](ev)
+      p.emit({ type: "session.execution.succeeded", data: { sessionID: "ses_1" } })
+      await tick()
+      assert.equal(inboxEvents(fx).length, 0, kind)
+      assert.equal(ev.system.length, 0, kind)
+      assert.equal(p.calls.length, 0, kind)
+      if (kind === "git") assert.deepEqual(readdirSync(join(fx.store, ".git")), [])
+      if (kind === "outside") assert.deepEqual(readdirSync(join(fx.root, "outside", "work")), [])
+    } finally {
+      p.cleanup()
+      rmSync(fx.root, { recursive: true, force: true })
+    }
+  }
+})
+
+test("backup is deduped per store across different project dirs", async () => {
+  const fx = fixture()
+  const project2 = join(fx.root, "other")
+  mkdirSync(project2, { recursive: true })
+  symlinkSync(join(fx.store, "work"), join(project2, ".learnings"))
+  fx.dirs = { ses_b: project2 }
+  const p = await start(fx)
+  try {
+    p.emit({ type: "session.execution.succeeded", data: { sessionID: "ses_a" } })
+    p.emit({ type: "session.execution.succeeded", data: { sessionID: "ses_b" } })
+    await tick()
+    assert.equal(p.calls.length, 1)
+    // Which session wins the race is not deterministic; only one backup must run.
+    assert.ok([fx.project, project2].includes(p.calls[0].cwd))
+  } finally {
+    p.cleanup()
+    rmSync(fx.root, { recursive: true, force: true })
+  }
+})
+
+test("no context injection for subagent sessions", async () => {
+  const fx = fixture()
+  writeFileSync(join(fx.store, "work", "INDEX.md"), "- [a.b](candidates/a.b.md) — correction ×2: x\n")
+  const p = await start(fx)
+  try {
+    const sub = { sessionID: "ses_sub", system: [] }
+    await p.hooks["session:context"](sub)
+    assert.equal(sub.system.length, 0)
+    const main = { sessionID: "ses_1", system: [] }
+    await p.hooks["session:context"](main)
+    assert.equal(main.system.length, 1)
+  } finally {
+    p.cleanup()
+    rmSync(fx.root, { recursive: true, force: true })
+  }
+})
+
+test("sessions map is capped at 200 (oldest evicted) and session.deleted drops state", async () => {
+  const fx = fixture()
+  const p = await start(fx)
+  try {
+    for (let i = 0; i < 201; i++) await p.hooks["session:prompt"](prompt(`ses_${i}`, `m${i}`, "hello"))
+    assert.equal(p.getCalls.length, 201)
+    await p.hooks["session:prompt"](prompt("ses_200", "x1", "hello"))
+    assert.equal(p.getCalls.length, 201, "newest session is still cached")
+    await p.hooks["session:prompt"](prompt("ses_0", "x2", "hello"))
+    assert.equal(p.getCalls.length, 202, "oldest session was evicted")
+
+    p.emit({ type: "session.deleted", data: { sessionID: "ses_200" } })
+    p.emit({ type: "session.deleted", data: { info: { id: "ses_199" } } })
+    await tick()
+    await p.hooks["session:prompt"](prompt("ses_200", "x3", "hello"))
+    await p.hooks["session:prompt"](prompt("ses_199", "x4", "hello"))
+    assert.equal(p.getCalls.length, 204)
+  } finally {
+    p.cleanup()
+    rmSync(fx.root, { recursive: true, force: true })
+  }
+})
+
+test("per-session dedupe set is cleared after 500 entries", async () => {
+  const fx = fixture()
+  const p = await start(fx)
+  try {
+    const fail = (n) => p.hooks["tool:execute.after"]({ status: "error", tool: "bash", sessionID: "ses_1", error: { message: `fail ${n}` } })
+    await fail(0)
+    await fail(0)
+    assert.equal(inboxEvents(fx).length, 1)
+    for (let i = 1; i <= 500; i++) await fail(i)
+    assert.equal(inboxEvents(fx).length, 501)
+    await fail(0) // set was cleared, so the first head is written again
+    assert.equal(inboxEvents(fx).length, 502)
+  } finally {
+    p.cleanup()
+    rmSync(fx.root, { recursive: true, force: true })
+  }
+})
+
+test("unacked count skips day files older than the ack date", async () => {
+  const fx = fixture()
+  writeFileSync(join(fx.store, "work", "inbox", "2026-01-01.jsonl"), `{"kind":"failure"}\n{"kind":"failure"}\n`) // no ts => would count if read
+  writeFileSync(join(fx.store, "work", "inbox", "2026-01-03.jsonl"), `{"ts":"2026-01-03T00:00:00Z","kind":"failure"}\n`)
+  writeFileSync(join(fx.store, "work", "inbox", ".ack"), "2026-01-02T12:00:00Z\n")
+  const p = await start(fx)
+  try {
+    const ev = { sessionID: "ses_1", system: [] }
+    await p.hooks["session:context"](ev)
+    assert.ok(ev.system[0].text.includes("1 unprocessed event "), ev.system[0]?.text)
+    assert.ok(ev.system[0].text.includes("Triage with the self-improving skill at a natural pause"))
+  } finally {
+    p.cleanup()
+    rmSync(fx.root, { recursive: true, force: true })
+  }
+})
+
+test("hook registration failure is logged unconditionally", async () => {
+  const fx = fixture()
+  const fake = fakeCtx(fx)
+  const logged = []
+  fake.ctx.log = { error: (entry) => void logged.push(entry) }
+  fake.ctx.tool.hook = async () => {
+    throw new Error("nope")
+  }
+  const cleanup = await plugin.setup(fake.ctx, { spawn: fakeSpawn([]), storeRoot: fx.store })
+  try {
+    assert.ok(logged.some((entry) => entry.message === "hook registration failed"), JSON.stringify(logged))
+  } finally {
+    cleanup()
     rmSync(fx.root, { recursive: true, force: true })
   }
 })

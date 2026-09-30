@@ -18,7 +18,7 @@ usage() {
 usage: learn <command> [args]        (learn --version prints the version)
 
 commands:
-  init [profile] [--name <project>]         set up the store and .learnings/ for this project (user-only)
+  init [profile]                            set up the store and .learnings/ for this project (user-only)
   inbox [--since <ts>] [--kind k] [--tier t] [--all] [--json]
                                             show plugin events (unacked by default)
   ack [--until <ts>]                        mark the inbox as processed
@@ -32,7 +32,8 @@ commands:
   status                                    profile, counts, unacked inbox, git state
   doctor                                    check symlink, frontmatter, index, markers
   grep <pattern> [grep opts]                search candidates/applied/rejected
-  prune [--days 90]                         seen=1 and idle candidates -> rejected (reason: stale)
+  prune [--days 90]                         seen=1 and idle candidates -> rejected (reason: stale);
+                                            also deletes acked inbox/*.jsonl older than --days
   markers list | add --tier <t> "<re>" | test "<text>"
   backup [--push]                           commit (and push) the store
   install-opencode                          install the global OpenCode plugin
@@ -63,6 +64,7 @@ OPENCODE_DIR="$SKILL_DIR/opencode"
 
 valid_slug() { [[ "$1" =~ ^[a-z0-9][a-z0-9-]*$ ]]; }
 valid_key() { [[ "$1" =~ ^[a-z]+\.[a-z0-9-]+$ ]]; }
+valid_owner() { [[ "$1" =~ ^(script|skill|new-skill|agents):.+ ]]; }
 
 require_slug() {
   valid_slug "$2" || die "invalid $1 '$2': use lowercase letters, digits, and hyphens"
@@ -339,16 +341,12 @@ cmd_index() {
 # ---------------------------------------------------------------------------
 
 cmd_init() {
-  local profile="" name="" name_given=0 item found suggestion target
+  local profile="" item found suggestion target
   while [ $# -gt 0 ]; do
     case "$1" in
-      --name)
-        [ "$name_given" -eq 0 ] || die "--name may be specified only once"
-        if [ $# -lt 2 ] || [ -z "$2" ]; then die "--name requires a value"; fi
-        name="$2"; name_given=1; shift 2 ;;
       -*) die "unknown option: $1" ;;
       *)
-        [ -z "$profile" ] || die "usage: learn init <profile> [--name <project>]"
+        [ -z "$profile" ] || die "usage: learn init <profile>"
         profile="$1"; shift ;;
     esac
   done
@@ -373,12 +371,11 @@ cmd_init() {
           [ -z "$suggestion" ] || echo "suggested (from .opencode -> $target): learn init $suggestion"
           ;;
       esac
-      echo "usage: learn init <profile> [--name <project>]"
+      echo "usage: learn init <profile>"
     } >&2
     exit 1
   fi
   require_slug "profile name" "$profile"
-  if [ "$name_given" -eq 1 ]; then validate_project "$name"; fi
 
   mkdir -p "$LEARN_HOME"
   STORE_HOME="$(cd -P "$LEARN_HOME" && pwd -P)"
@@ -411,9 +408,6 @@ cmd_init() {
   ln -sfn "$pdir" .learnings
   ensure_global_gitignore
   echo "initialized: profile '$profile' at $pdir"
-  if [ "$name_given" -eq 1 ]; then
-    echo "project name '$name' is not stored; use LEARN_PROJECT=$name or --project $name"
-  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -487,7 +481,7 @@ read_ack() {
 }
 
 cmd_inbox() {
-  local since="" kind="" tier="" all=0 json=0 ack out
+  local since="" kind="" tier="" all=0 json=0 ack out maxts
   while [ $# -gt 0 ]; do
     case "$1" in
       --since) [ $# -ge 2 ] || die "--since requires a value"; since="$2"; shift 2 ;;
@@ -505,7 +499,13 @@ cmd_inbox() {
     inbox_stream raw "$since" "$ack" "$kind" "$tier"
   else
     out="$(inbox_stream compact "$since" "$ack" "$kind" "$tier")"
-    if [ -n "$out" ]; then printf '%s\n' "$out"; else echo "(no events)"; fi
+    if [ -n "$out" ]; then
+      printf '%s\n' "$out"
+      maxts="$(printf '%s\n' "$out" | awk '{ print $1 }' | LC_ALL=C sort | tail -n 1)"
+      echo "ack: learn ack --until $maxts" >&2
+    else
+      echo "(no events)"
+    fi
   fi
 }
 
@@ -572,6 +572,7 @@ cmd_add() {
   [ -n "$evidence" ] || die "evidence must not be empty"
   behavior="$(oneline "$behavior")"
   [ -n "$behavior" ] || behavior="$summary"
+  owner="$(oneline "$owner")"
   [ -n "$project" ] || project="$(default_project)"
   validate_project "$project"
 
@@ -697,7 +698,8 @@ cmd_apply() {
   [ -n "$key" ] && [ -n "$owner" ] && [ -n "$ref" ] || die "usage: learn apply <key> --owner <o> --change-ref <r>"
   resolve_profile
   valid_key "$key" || die "invalid key '$key'"
-  [[ "$owner" =~ ^(script|skill|agents):.+ ]] || die "invalid owner '$owner': use script:<path> | skill:<name> | agents:<repo>"
+  owner="$(oneline "$owner")"
+  valid_owner "$owner" || die "invalid owner '$owner': use script:<path> | skill:<name> | new-skill:<name> | agents:<repo>"
   ref="$(oneline "$ref")"
   local existing
   existing="$(find_key "$key")"
@@ -772,6 +774,24 @@ cmd_prune() {
   done
   write_index
   echo "pruned $moved candidate(s)"
+
+  # Acked inbox files: filename date older than (ack date - days) means every event is acked and stale.
+  local ack ack_date ack_days fdate removed=0
+  ack="$(read_ack)"
+  ack_date="${ack:0:10}"
+  if valid_calendar_date "$ack_date"; then
+    ack_days="$(days_from_civil "$ack_date")"
+    for f in "$PDIR"/inbox/*.jsonl; do
+      [ -e "$f" ] || continue
+      fdate="$(basename "$f" .jsonl)"
+      valid_calendar_date "$fdate" || continue
+      if [ "$(days_from_civil "$fdate")" -lt $((ack_days - days)) ]; then
+        rm -f "$f"
+        removed=$((removed + 1))
+      fi
+    done
+  fi
+  echo "removed $removed acked inbox file(s)"
 }
 
 # ---------------------------------------------------------------------------
@@ -842,7 +862,9 @@ doctor_dir_checks() {   # doctor_dir_checks <dirname>
         [ "$status" = "applied" ] || dprob "BAD STATUS ('$status' in applied/): $d/$base"
         for v in owner change-ref applied-at; do
           [ -n "$(fm_get "$f" "$v")" ] || dprob "APPLIED MISSING $v: $d/$base"
-        done ;;
+        done
+        v="$(fm_get "$f" owner)"
+        if [ -n "$v" ] && ! valid_owner "$v"; then dprob "BAD OWNER ('$v'; use script:|skill:|new-skill:|agents:): $d/$base"; fi ;;
       rejected)
         [ "$status" = "rejected" ] || dprob "BAD STATUS ('$status' in rejected/): $d/$base"
         [ -n "$(fm_get "$f" reason)" ] || dprob "REJECTED MISSING reason: $d/$base" ;;
@@ -898,19 +920,9 @@ cmd_doctor() {
   fi
   # markers.json
   if [ -f "$STORE_HOME/markers.json" ]; then
-    if command -v node >/dev/null 2>&1; then
-      if ! L_FILE="$STORE_HOME/markers.json" node -e '
-        const fs = require("fs");
-        const j = JSON.parse(fs.readFileSync(process.env.L_FILE, "utf8"));
-        const all = [];
-        for (const t of ["strong", "medium", "weak"]) all.push(...((j.correction && j.correction[t]) || []));
-        all.push(...(j.confirmation || []));
-        for (const re of all) new RegExp(re, "iu");
-      ' 2>/dev/null; then
-        dprob "BAD MARKERS: $STORE_HOME/markers.json is not valid JSON or contains an invalid regex"
-      fi
-    else
-      echo "warning: node not found; markers.json not validated"
+    local merrs line
+    if ! merrs="$(validate_markers_file "$STORE_HOME/markers.json")"; then
+      while IFS= read -r line; do dprob "BAD MARKERS: $line"; done <<< "$merrs"
     fi
   else
     echo "warning: $STORE_HOME/markers.json missing (run 'learn init <profile>')"
@@ -935,6 +947,40 @@ cmd_grep() {
 # ---------------------------------------------------------------------------
 # markers
 # ---------------------------------------------------------------------------
+
+# Validate a markers JSON file via learn-core.js validateMarkers(json) (array of
+# error strings, empty = ok). Errors go to stdout, one per line; returns 1 if any.
+# Without node, learn-core.js, or the export: JSON-syntax check only (with a warning).
+validate_markers_file() {   # validate_markers_file <file>
+  local out rc=0
+  if ! command -v node >/dev/null 2>&1; then
+    warn "warning: node not found; markers not validated"
+    return 0
+  fi
+  out="$(L_FILE="$1" L_CORE="$OPENCODE_DIR/learn-core.js" node -e '
+    const fs = require("fs");
+    const { pathToFileURL } = require("url");
+    let j;
+    try { j = JSON.parse(fs.readFileSync(process.env.L_FILE, "utf8")); }
+    catch (e) { console.log("not valid JSON: " + e.message); process.exit(1); }
+    import(pathToFileURL(process.env.L_CORE).href).then((m) => {
+      if (typeof m.validateMarkers !== "function") {
+        console.error("learn: warning: validateMarkers unavailable in learn-core.js; only JSON syntax checked");
+        return;
+      }
+      const errs = m.validateMarkers(j) || [];
+      if (errs.length) { for (const e of errs) console.log(e); process.exit(1); }
+    }).catch((e) => {
+      console.error("learn: warning: cannot load learn-core.js (" + (e && e.message ? e.message : e) + "); only JSON syntax checked");
+    });
+  ')" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    [ -n "$out" ] || out="markers validation failed (exit $rc)"
+    printf '%s\n' "$out"
+    return 1
+  fi
+  return 0
+}
 
 cmd_markers() {
   local sub="${1:-}"
@@ -976,10 +1022,11 @@ cmd_markers() {
       case "$tier" in strong|medium|weak|confirmation) ;; *) die "usage: learn markers add --tier strong|medium|weak|confirmation \"<re>\"" ;; esac
       [ -n "$re" ] || die "usage: learn markers add --tier strong|medium|weak|confirmation \"<re>\""
       command -v node >/dev/null 2>&1 || die "node is required for 'markers add'"
-      L_FILE="$personal_file" L_TIER="$tier" L_RE="$re" node -e '
+      local mtmp="$personal_file.tmp.$$" merrs
+      rm -f "$mtmp"
+      L_FILE="$personal_file" L_TMP="$mtmp" L_TIER="$tier" L_RE="$re" node -e '
         const fs = require("fs");
         const f = process.env.L_FILE, t = process.env.L_TIER, re = process.env.L_RE;
-        try { new RegExp(re, "iu"); } catch (e) { console.error("invalid regex: " + e.message); process.exit(2); }
         let j;
         try { j = JSON.parse(fs.readFileSync(f, "utf8")); }
         catch (e) {
@@ -993,11 +1040,16 @@ cmd_markers() {
         else arr = (j.correction[t] = j.correction[t] || []);
         if (arr.includes(re)) { console.log("already present in " + t); process.exit(0); }
         arr.push(re);
-        const tmp = f + ".tmp." + process.pid;
-        fs.writeFileSync(tmp, JSON.stringify(j, null, 2) + "\n");
-        fs.renameSync(tmp, f);
-        console.log("added to " + t + ": " + re);
-      ' || die "could not add marker"
+        fs.writeFileSync(process.env.L_TMP, JSON.stringify(j, null, 2) + "\n");
+      ' || { rm -f "$mtmp"; die "could not add marker"; }
+      if [ -f "$mtmp" ]; then
+        if ! merrs="$(validate_markers_file "$mtmp")"; then
+          rm -f "$mtmp"
+          die "could not add marker: $merrs"
+        fi
+        mv "$mtmp" "$personal_file"
+        echo "added to $tier: $re"
+      fi
       ;;
     test)
       [ $# -eq 1 ] || die "usage: learn markers test \"<text>\""

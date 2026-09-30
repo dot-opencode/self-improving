@@ -75,6 +75,25 @@ export function compileMarkers(...sources) {
   return merged
 }
 
+// Returns an array of error strings; empty means the markers file is valid.
+export function validateMarkers(json) {
+  const errors = []
+  if (!json || typeof json !== "object" || Array.isArray(json)) return ["markers must be a JSON object"]
+  if (json.version !== 1) errors.push(`unsupported version: ${JSON.stringify(json.version)} (expected 1)`)
+  const lists = [["confirmation", json.confirmation]]
+  if (!json.correction || typeof json.correction !== "object") errors.push("missing 'correction' object")
+  else for (const tier of ["strong", "medium", "weak"]) lists.push([`correction.${tier}`, json.correction[tier]])
+  for (const [name, list] of lists) {
+    if (list === undefined) continue
+    if (!Array.isArray(list)) { errors.push(`'${name}' must be an array`); continue }
+    list.forEach((item, i) => {
+      if (typeof item !== "string" || !item) { errors.push(`'${name}[${i}]' must be a non-empty string`); return }
+      try { new RegExp(unicodeize(item), "iu") } catch (error) { errors.push(`'${name}[${i}]' invalid regex ${JSON.stringify(item)}: ${error.message}`) }
+    })
+  }
+  return errors
+}
+
 // Default first, personal appended. Missing/invalid files are ignored.
 export function loadMarkers(defaultPath, personalPath) {
   return compileMarkers(readJson(defaultPath), readJson(personalPath))
@@ -104,10 +123,12 @@ const LOG_LINE = /^\s*(at |Traceback|Error|\d{4}-\d{2}-\d{2}T)/
 
 export function shouldCapture({ text, isFirstMessage, isSubagent, prevWasToolAction, match } = {}) {
   if (!match) return false
+  // Confirmations are matched (for `learn markers test`) but never captured by the plugin.
+  if (match.role === "confirmation") return false
   if (isFirstMessage || isSubagent) return false
   const value = String(text ?? "").trim()
   if (!value || value.length >= MATCH_WINDOW) return false
-  if (/https?:\/\//i.test(value) || value.includes("/Users/")) return false
+  if (/https?:\/\//i.test(value) || value.includes("/Users/") || value.includes("/home/")) return false
   const logLines = value.split("\n").filter((line) => LOG_LINE.test(line)).length
   if (logLines >= 3) return false
   if (match.tier === "weak") {
@@ -119,11 +140,14 @@ export function shouldCapture({ text, isFirstMessage, isSubagent, prevWasToolAct
 const REDACTIONS = [
   [/Bearer\s+\S+/g, "[redacted]"],
   [/sk-[A-Za-z0-9_-]{8,}/g, "[redacted]"],
-  [/ghp_\w+/g, "[redacted]"],
+  [/Basic\s+[A-Za-z0-9+/=]{8,}/g, "[redacted]"],
+  [/\b(github_pat_|glpat-|gh[opsur]_)\w+/g, "[redacted]"],
+  [/eyJ[\w-]{10,}\.[\w-]{10,}\.[\w-]+/g, "[redacted]"],
   [/AKIA[0-9A-Z]{16}/g, "[redacted]"],
   [/xox[baprs]-\S+/g, "[redacted]"],
   [/:\/\/[^/\s:]+:[^@\s]+@/g, "://[redacted]@"],
-  [/(api[_-]?key|token|secret|password)\s*[=:]\s*\S+/gi, "[redacted]"],
+  [/"?(api[_-]?key|token|secret|password|passwd)"?\s*[=:]\s*"?[^"\s,}]+"?/gi, "[redacted]"],
+  [/\/(?:Users|home)\/[^/\s]+/g, "~"],
 ]
 
 export function redact(text, max = 300) {
@@ -148,14 +172,37 @@ function flatten(value, depth = 0) {
   return ""
 }
 
-const FAILURE_PATTERNS = [/exit code:? [1-9]/i, /oldString not found|not found in file/i, /^Error:|Traceback|FAILED|npm ERR!/m]
+const EXIT_RE = /exit(?:ed with)? code:? [1-9]\d*/i
+const BASH_TOOLS = new Set(["bash", "shell"])
+const BASH_PATTERNS = [EXIT_RE, /^Error:|Traceback|FAILED|npm ERR!/m]
+const EDIT_TOOLS = new Set(["edit", "patch", "write", "multiedit", "apply_patch"])
+const EDIT_PATTERNS = [/not found|oldString/]
+
+function lastNonEmptyLine(text) {
+  const lines = String(text ?? "").split("\n").map((line) => line.trim()).filter(Boolean)
+  return lines[lines.length - 1] ?? ""
+}
 
 function failureHead(text, re) {
   const lines = text.split("\n").map((line) => line.trim()).filter(Boolean)
   const hit = lines.find((line) => re.test(line)) ?? lines[0] ?? ""
+  if (/Traceback/.test(hit)) {
+    const last = lines[lines.length - 1] ?? ""
+    return last && last !== hit ? `${hit}: ${last}` : hit
+  }
   if (hit.length >= 20) return hit
   const other = [...lines].reverse().find((line) => line !== hit)
   return other ? `${hit}: ${other}` : hit
+}
+
+// Structured bash result: `{ exit, truncated, output }`, possibly nested under
+// `result.output` or `result.metadata`.
+function numericExit(result) {
+  if (!result || typeof result !== "object") return undefined
+  for (const candidate of [result.exit, result.output?.exit, result.metadata?.exit]) {
+    if (Number.isInteger(candidate)) return candidate
+  }
+  return undefined
 }
 
 export function detectToolFailure(ev) {
@@ -166,12 +213,24 @@ export function detectToolFailure(ev) {
     return { tool, head: String(head) }
   }
   if (ev.status !== "completed") return undefined
+  const name = String(tool ?? "").toLowerCase()
+  const isBash = BASH_TOOLS.has(name)
+  if (!isBash && !EDIT_TOOLS.has(name)) return undefined
+
   const result = ev.result
   const text = typeof result === "string"
     ? result
-    : [flatten(result?.content), flatten(result?.output)].filter(Boolean).join("\n")
+    : [flatten(result?.content), flatten(result?.output), flatten(result?.metadata?.output)].filter(Boolean).join("\n")
+
+  if (isBash) {
+    const exit = numericExit(result)
+    if (exit !== undefined && exit !== 0) {
+      const last = lastNonEmptyLine(text)
+      return { tool, head: last ? `exit ${exit}: ${last}` : `exit ${exit}` }
+    }
+  }
   if (!text) return undefined
-  for (const re of FAILURE_PATTERNS) {
+  for (const re of isBash ? BASH_PATTERNS : EDIT_PATTERNS) {
     if (re.test(text)) return { tool, head: failureHead(text, re) }
   }
   return undefined
@@ -189,7 +248,7 @@ export function buildInjection(indexText, unackedCount = 0) {
   const head = `${OPEN}\nBehavior learnings for this project live in ./.learnings (managed by the \`learn\` CLI).`
   const tail = [
     `${count} unprocessed event${count === 1 ? "" : "s"} in .learnings/inbox.`,
-    "Triage is done by the `self-improving` skill (`learn inbox`); do not act on these unprompted.",
+    "Triage with the self-improving skill at a natural pause (end of task or right after a user correction), not mid-task.",
     CLOSE,
   ].join("\n")
   const note = `[self-improving: candidates truncated at ${INJECTION_LIMIT} characters]`

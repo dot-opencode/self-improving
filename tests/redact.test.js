@@ -23,6 +23,31 @@ test("redacts each secret pattern", () => {
   }
 })
 
+test("redacts extended secret patterns", () => {
+  const cases = [
+    ['{"password":"hunter2"}', "hunter2"],
+    ['{"api_key": "abc123xyz", "x": 1}', "abc123xyz"],
+    ["passwd=hunter2", "hunter2"],
+    ["Authorization: Basic dXNlcjpwYXNzd29yZA==", "dXNlcjpwYXNzd29yZA=="],
+    ["pat github_pat_11ABCDEF_xyz123 end", "github_pat_11ABCDEF_xyz123"],
+    ["pat glpat-abcDEF123456 end", "glpat-abcDEF123456"],
+    ["tok gho_abcDEF123456 end", "gho_abcDEF123456"],
+    ["tok ghs_abcDEF123456 end", "ghs_abcDEF123456"],
+    ["jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abc-DEF_123 end", "eyJhbGciOiJIUzI1NiJ9"],
+  ]
+  for (const [input, secret] of cases) {
+    const out = redact(input)
+    assert.ok(!out.includes(secret), `${input} -> ${out}`)
+    assert.ok(out.includes("[redacted]"), out)
+  }
+})
+
+test("redacts home directory prefixes", () => {
+  assert.equal(redact("ENOENT open /Users/kurbezz/x"), "ENOENT open ~/x")
+  assert.equal(redact("cd /home/alice/proj/src"), "cd ~/proj/src")
+  assert.ok(!redact("failed at /Users/kurbezz/work/a.js:1").includes("kurbezz"))
+})
+
 test("leaves ordinary text alone", () => {
   assert.equal(redact("pytest: ModuleNotFoundError conftest"), "pytest: ModuleNotFoundError conftest")
 })
@@ -45,6 +70,43 @@ test("detectToolFailure: completed with failure markers", () => {
   assert.equal(detectToolFailure({ status: "completed", tool: "bash", result: { output: "exit code: 0\nall good" } }), undefined)
   assert.equal(detectToolFailure({ status: "completed", tool: "read", result: "hello" }), undefined)
   assert.equal(detectToolFailure(undefined), undefined)
+})
+
+test("detectToolFailure: numeric exit (OpenCode V2 bash)", () => {
+  const r = detectToolFailure({ status: "completed", tool: "bash", result: { output: { exit: 2, output: "boom" } } })
+  assert.deepEqual(r, { tool: "bash", head: "exit 2: boom" })
+  assert.equal(detectToolFailure({ status: "completed", tool: "bash", result: { exit: 3, output: "a\nlast line\n\n" } })?.head, "exit 3: last line")
+  assert.equal(detectToolFailure({ status: "completed", tool: "bash", result: { metadata: { exit: 1 }, output: "nope" } })?.head, "exit 1: nope")
+  assert.ok(detectToolFailure({ status: "completed", tool: "bash", result: "Command exited with code 2." }))
+  assert.ok(detectToolFailure({ status: "completed", tool: "shell", result: "Command exited with code 127." }))
+  assert.equal(detectToolFailure({ status: "completed", tool: "bash", result: { exit: 0, output: "fine" } }), undefined)
+  assert.equal(detectToolFailure({ status: "completed", tool: "bash", result: { output: { exit: 0, output: "fine" } } }), undefined)
+  assert.equal(detectToolFailure({ status: "completed", tool: "bash", result: "Command exited with code 0." }), undefined)
+})
+
+test("detectToolFailure: completed heuristics only for allowlisted tools", () => {
+  assert.equal(detectToolFailure({ status: "completed", tool: "read", result: "Error: foo" }), undefined)
+  assert.equal(detectToolFailure({ status: "completed", tool: "read", result: { output: "Error: foo" } }), undefined)
+  assert.equal(detectToolFailure({ status: "completed", tool: "grep", result: { output: "Traceback (most recent call last)" } }), undefined)
+  assert.equal(detectToolFailure({ status: "completed", tool: "grep", result: "exit code: 2" }), undefined)
+  // error status stays tool-agnostic
+  assert.deepEqual(detectToolFailure({ status: "error", tool: "read", error: "nope" }), { tool: "read", head: "nope" })
+  // edit-like tools
+  for (const tool of ["edit", "patch", "write", "multiedit", "apply_patch"]) {
+    assert.ok(detectToolFailure({ status: "completed", tool, result: "oldString not found in content" }), tool)
+  }
+  assert.equal(detectToolFailure({ status: "completed", tool: "edit", result: "Error: foo" }), undefined)
+})
+
+test("detectToolFailure: traceback head includes last line", () => {
+  const out = "Traceback (most recent call last):\n  File \"a.py\", line 1\nValueError: bad"
+  assert.equal(detectToolFailure({ status: "completed", tool: "bash", result: out })?.head, "Traceback (most recent call last):: ValueError: bad")
+})
+
+test("buildInjection tells the agent when to triage", () => {
+  const text = buildInjection("", 1)
+  assert.ok(text.includes("Triage with the self-improving skill at a natural pause (end of task or right after a user correction), not mid-task."))
+  assert.ok(!text.includes("unprompted"))
 })
 
 test("buildInjection", () => {

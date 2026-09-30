@@ -1,6 +1,6 @@
 ---
 name: self-improving
-description: Turn repeated agent mistakes and user corrections into a durable behavior change (script, skill patch, new skill, or AGENTS.md suggestion). Use after a user correction ("нет, я про другое", "no, stop", "I said…"), after a repeated tool failure, on "запомни урок", "разбери inbox", "/learn", "learn from this", at the end of a large task, and whenever the context contains a `<self-improving>` block with unprocessed events > 0.
+description: Turn repeated agent mistakes and user corrections into a durable behavior change (script, skill patch, new skill, or AGENTS.md suggestion). Use after a user correction ("нет, я про другое", "no, stop", "I said…"), after a repeated tool failure, on "запомни урок", "разбери inbox", "/learn", "learn from this", and at a natural pause (end of a task) when the context contains a `<self-improving>` block with unprocessed events > 0. Never mid-task.
 license: MIT
 ---
 
@@ -23,7 +23,7 @@ suggest `learn init <profile>` to the user, but never run it yourself.
 - The same tool failure happened again in this session or across sessions.
 - The user says "запомни урок", "разбери inbox", "/learn", "learn from this".
 - A large task just finished — do a short triage while context is fresh.
-- Your context contains `<self-improving>` with `N unprocessed events` (N > 0).
+- Your context contains `<self-improving>` with `N unprocessed events` (N > 0) **and** you are at a natural pause. Do not interrupt a task to triage.
 
 ## Never
 
@@ -62,7 +62,7 @@ Keep an event only if all hold:
 1. It is about the agent's **behavior** — a project fact instead → suggest `agent-memory`.
 2. It is **not derivable** from code, docs, or existing skills.
 3. It is **not a one-off** ("сейчас сделай так", a task-specific instruction).
-4. A `confirmation` counts only when it confirms an approach you yourself considered risky.
+4. The plugin does not capture confirmations. Record one yourself (`--kind confirmation`) only when the user confirmed an approach you yourself considered risky — so you do not drift away from it later.
 
 Then:
 
@@ -70,7 +70,7 @@ Then:
   `references/pattern-keys.md`. Run `learn grep <symptom>` first to find an existing key.
 - Existing key → `learn bump <key> --evidence "…" [--project p]`. New → `learn add --key … --kind … --summary "<≤120>" --evidence "…"`.
 - Write evidence as a redacted one-liner: what happened and what the user wanted. No quotes with profanity, no secrets.
-- After processing the batch, run `learn ack`.
+- After processing the batch, run the `learn ack --until <ts>` command that `learn inbox` printed as its trailer, so events that arrived meanwhile stay unprocessed.
 
 ## Promotion threshold
 
@@ -127,8 +127,8 @@ After approve, change **exactly one owner**.
 - New skill → create it through the `writing-skills` skill. Keep it small; put only the behavior, not the evidence.
 - Patching a skill in `~/.agents/skills`: warn the user that `npx skills` may overwrite it later; prefer a fork under `.agents-configs/common/<profile>/skills`.
 - `AGENTS.md` is never edited without approve, and only for the repo named in the proposal.
-- Record it: `learn apply <key> --owner <script:path|skill:name|agents:repo> --change-ref <commit|path>`.
-- Then run `learn index && learn backup`.
+- Record it: `learn apply <key> --owner <script:path|skill:name|new-skill:name|agents:repo> --change-ref <commit|path>`.
+- Then run `learn backup`.
 
 ## Terminal states
 

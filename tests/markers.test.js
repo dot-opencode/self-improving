@@ -122,7 +122,12 @@ const capture = (text, opts = {}) => {
 
 test("shouldCapture accepts follow-up corrections", () => {
   assert.equal(capture("Нет, я про другое"), true)
-  assert.equal(capture("ок"), true)
+})
+
+test("shouldCapture never captures confirmations (matchMarkers still reports them)", () => {
+  assert.equal(matchMarkers("ок", markers)?.role, "confirmation")
+  assert.equal(capture("ок"), false)
+  assert.equal(capture("LGTM", { prevWasToolAction: true }), false)
 })
 
 test("shouldCapture rejects first message, subagent, no match", () => {
@@ -134,6 +139,7 @@ test("shouldCapture rejects first message, subagent, no match", () => {
 test("shouldCapture rejects URLs, /Users/ paths, pasted logs", () => {
   assert.equal(capture("Нет, смотри https://example.com/x"), false)
   assert.equal(capture("нет, файл /Users/me/x.txt"), false)
+  assert.equal(capture("нет, файл /home/me/x.txt"), false)
   const logs = "нет, вот лог\nat foo (a.js:1)\nat bar (b.js:2)\nat baz (c.js:3)"
   assert.equal(capture(logs), false)
   assert.equal(capture("нет, вот лог\nat foo (a.js:1)"), true)
@@ -148,4 +154,17 @@ test("weak tier requires prevWasToolAction and len<200", () => {
   assert.equal(capture("Почему ci упал?"), false)
   assert.equal(capture("Почему ci упал?", { prevWasToolAction: true }), true)
   assert.equal(capture(`почему ${"а".repeat(200)}`, { prevWasToolAction: true }), false)
+})
+
+test("validateMarkers: accepts shipped defaults, reports bad shape and bad regex", async () => {
+  const { validateMarkers } = await import("../skills/self-improving/opencode/learn-core.js")
+  const { readFileSync } = await import("node:fs")
+  for (const f of ["markers.default.json", "markers.personal.default.json"]) {
+    const json = JSON.parse(readFileSync(new URL(`../skills/self-improving/opencode/${f}`, import.meta.url), "utf8"))
+    assert.deepEqual(validateMarkers(json), [], f)
+  }
+  assert.ok(validateMarkers(null).length > 0)
+  assert.ok(validateMarkers({ version: 2, correction: { strong: [] } }).some((e) => e.includes("version")))
+  assert.ok(validateMarkers({ version: 1, correction: { strong: ["("] } }).some((e) => e.includes("invalid regex")))
+  assert.ok(validateMarkers({ version: 1, correction: { strong: "x" } }).some((e) => e.includes("must be an array")))
 })
