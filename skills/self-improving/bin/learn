@@ -465,10 +465,10 @@ inbox_stream() {
   [ "${#files[@]}" -gt 0 ] || return 0
   IN_MODE="$1" IN_SINCE="$2" IN_ACK="$3" IN_KIND="$4" IN_TIER="$5" awk '
     function jget(s, name,   pat, i, n, c, out, len) {
-      pat = "\"" name "\":\""
-      i = index(s, pat)
-      if (i == 0) return ""
-      i += length(pat)
+      # Tolerate `"key": "v"` (spaced JSON) as well as the compact `"key":"v"`.
+      pat = "\"" name "\"[ \t]*:[ \t]*\""
+      if (!match(s, pat)) return ""
+      i = RSTART + RLENGTH
       len = length(s)
       out = ""
       for (n = i; n <= len; n++) {
@@ -1597,6 +1597,8 @@ cmd_dream() {
   # AGENT_LEARNINGS_HOME is pinned so the agent's `learn` calls see this store
   # even when the caller passed a relative path.
   local outfile rc=0
+  # The agent writes free text to .drafts/draft.md; do not rely on its write tool creating the dir.
+  mkdir -p "$STORE_HOME/.drafts"
   outfile="$(mktemp "${TMPDIR:-/tmp}/learn-dream.XXXXXX")" || die "cannot create temporary file"
   set +e
   (cd "$STORE_HOME" && AGENT_LEARNINGS_HOME="$STORE_HOME" OPENCODE_CONFIG_CONTENT="$config" \

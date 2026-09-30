@@ -636,6 +636,22 @@ check "failed dream keeps .dream-last" test "$(cat "$DSTORE/.dream-last")" = "$L
 unset STUB_LOG LEARN_TODAY
 cd "$TMP/proj" || exit 1
 
+# dream creates .drafts/ before the agent starts (its write tool may not create parent dirs)
+rm -rf "$DSTORE/.drafts"
+OUT="$(STUB_FAIL=1 PATH="$STUBBIN:$PATH" AGENT_LEARNINGS_HOME="$DSTORE" "$LEARN" dream 2>&1)"
+check "dream pre-creates .drafts/ before the agent runs" test -d "$DSTORE/.drafts"
+
+# spaced JSON lines (e.g. from python json.dumps) parse like compact ones
+SSTORE="$TMP/sstore"
+mkdir -p "$SSTORE/work/inbox" "$SSTORE/work/candidates" "$SSTORE/work/applied" "$SSTORE/work/rejected"
+git -C "$SSTORE" init -q
+printf '%s\n' '{"ts": "2026-07-22T10:00:00Z", "kind": "failure", "tool": "bash", "head": "exit 1: boom", "project": "proj-a"}' > "$SSTORE/work/inbox/2026-07-22.jsonl"
+OUT="$(AGENT_LEARNINGS_HOME="$SSTORE" "$LEARN" inbox --profile work 2>&1)"
+expect_contains "inbox parses spaced JSON" "2026-07-22T10:00:00Z  failure  proj-a  bash: exit 1: boom"
+expect_contains "inbox trailer from spaced JSON" "ack: learn ack --until 2026-07-22T10:00:00Z"
+OUT="$(AGENT_LEARNINGS_HOME="$SSTORE" "$LEARN" dream --report 2>&1)"
+expect_contains "dream --report oldest/newest from spaced JSON" "oldest 2026-07-22T10:00:00Z, newest 2026-07-22T10:00:00Z"
+
 echo
 echo "passed: $PASSES, failed: $FAILS"
 [ "$FAILS" -eq 0 ]
