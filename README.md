@@ -95,7 +95,7 @@ agent action and for messages < 200 chars.
 - The inbox stores only a redacted `head`/`snippet` (≤ 300 chars): tokens, API keys,
   passwords, `Bearer …`, `sk-…`, `ghp_…`, `AKIA…`, `xox…`, and URLs with credentials
   become `[redacted]`. No transcripts, no tool I/O.
-- `.learnings/` is globally gitignored in projects; the store is its own git repo
+- `.learnings` is globally gitignored in projects (as `.learnings`, without a trailing slash: it is a symlink, and git treats symlinks as files); the store is its own git repo
   (`learn backup` commits, `--push` pushes). Keep its remote private.
 - Candidates, skills, and rules never contain profanity or personal phrasing.
 

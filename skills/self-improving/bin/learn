@@ -245,12 +245,22 @@ ensure_global_gitignore() {
     esac
   fi
   f="${f/#\~/$HOME}"
-  if [ -f "$f" ] && grep -qxF '.learnings/' "$f"; then return 0; fi
+  # `.learnings` is a symlink, which git treats as a file: a trailing-slash pattern
+  # (`.learnings/`) only matches directories and would leave it untracked-but-visible.
+  if [ -f "$f" ] && grep -qxF '.learnings' "$f"; then return 0; fi
   mkdir -p "$(dirname "$f")"
+  if [ -f "$f" ] && grep -qxF '.learnings/' "$f"; then
+    local tmp
+    tmp="$(mk_tmp "$(dirname "$f")")"
+    awk '$0 == ".learnings/" { print ".learnings"; next } { print }' "$f" > "$tmp" && mv "$tmp" "$f"
+    git config --global core.excludesfile "$f"
+    echo "fixed global gitignore ($f): '.learnings/' -> '.learnings' (it is a symlink)"
+    return 0
+  fi
   if [ -s "$f" ] && [ -n "$(tail -c 1 "$f")" ]; then printf '\n' >> "$f"; fi
-  printf '.learnings/\n' >> "$f"
+  printf '.learnings\n' >> "$f"
   git config --global core.excludesfile "$f"
-  echo "added '.learnings/' to global gitignore ($f)"
+  echo "added '.learnings' to global gitignore ($f)"
 }
 
 # ---------------------------------------------------------------------------

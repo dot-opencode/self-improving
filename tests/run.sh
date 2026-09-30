@@ -83,7 +83,17 @@ if command -v node >/dev/null 2>&1; then
   check "markers.json is valid JSON" node -e 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"))' "$STORE/markers.json"
 fi
 check ".learnings symlink -> profile" test "$(readlink .learnings)" = "$PDIR"
-check "global gitignore has .learnings/" grep -qxF '.learnings/' "$HOME/.config/git/ignore"
+check "global gitignore has .learnings (no trailing slash)" grep -qxF '.learnings' "$HOME/.config/git/ignore"
+( cd "$TMP/proj" && git init -q . 2>/dev/null )
+check "git ignores the .learnings symlink" git -C "$TMP/proj" check-ignore -q .learnings
+if git -C "$TMP/proj" status --porcelain | grep -q '\.learnings'; then fail "git status hides .learnings" "$(git -C "$TMP/proj" status --porcelain)"; else pass "git status hides .learnings"; fi
+rm -rf "$TMP/proj/.git"
+# legacy '.learnings/' (directory-only pattern) is rewritten in place, other lines kept
+printf '%s\n' '**/.claude/settings.local.json' '.memory/' '.learnings/' > "$HOME/.config/git/ignore"
+expect_ok "init repairs legacy .learnings/ pattern" init work
+expect_contains "init reports the gitignore fix" "fixed global gitignore"
+check "legacy pattern replaced" test "$(grep -cxF '.learnings' "$HOME/.config/git/ignore")" = 1 -a "$(grep -cxF '.learnings/' "$HOME/.config/git/ignore")" = 0
+check "other gitignore lines kept" grep -qxF '.memory/' "$HOME/.config/git/ignore"
 expect_ok "init is idempotent" init work
 expect_die "init rejects bad profile" "invalid profile" init "Bad Name"
 expect_die "init no longer accepts --name" "unknown option" init work --name foo
