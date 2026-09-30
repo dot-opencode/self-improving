@@ -1,0 +1,13 @@
+{
+  "name": "opencode-self-improving",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "bash tests/run.sh && node --test tests/"
+  },
+  "license": "MIT"
+}
