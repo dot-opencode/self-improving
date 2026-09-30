@@ -251,17 +251,30 @@ export function indexLines(indexText) {
   return String(indexText ?? "").split("\n").filter((line) => line.startsWith("- ["))
 }
 
-export function buildInjection(indexText, unackedCount = 0) {
+const PROPOSED_LIST_CAP = 10
+
+export function buildInjection(indexText, unackedCount = 0, proposedKeys = []) {
   const lines = indexLines(indexText)
   const count = Number(unackedCount) || 0
+  const proposed = Array.isArray(proposedKeys) ? proposedKeys.filter((key) => typeof key === "string" && key) : []
   if (lines.length === 0 && count === 0) return undefined
 
   const head = `${OPEN}\nBehavior learnings for this project live in ./.learnings (managed by the \`learn\` CLI).`
-  const tail = [
-    `${count} unprocessed event${count === 1 ? "" : "s"} in .learnings/inbox.`,
-    "Triage with the self-improving skill at a natural pause (end of task or right after a user correction), not mid-task.",
-    CLOSE,
-  ].join("\n")
+  const tailLines = []
+  if (proposed.length > 0) {
+    const shown = proposed.slice(0, PROPOSED_LIST_CAP).join(", ")
+    const more = proposed.length > PROPOSED_LIST_CAP ? ", …" : ""
+    tailLines.push(`Proposed, waiting for the user's decision (${proposed.length}): ${shown}${more}`)
+  }
+  if (count > 0) {
+    tailLines.push(
+      `Inbox: ${count} unprocessed event${count === 1 ? "" : "s"}. The nightly \`learn dream\` triages them; do not triage the inbox in-session unless the user asks.`,
+    )
+  }
+  if (proposed.length > 0) {
+    tailLines.push("At a natural pause (end of a task), offer the proposed candidates to the user with the self-improving skill. Never mid-task.")
+  }
+  const tail = [...tailLines, CLOSE].join("\n")
   const note = `[self-improving: candidates truncated at ${INJECTION_LIMIT} characters]`
 
   const build = (items, truncated) =>

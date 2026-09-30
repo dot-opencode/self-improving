@@ -176,7 +176,7 @@ test("context injection is pushed once and within 4096 chars", async () => {
     const text = ev.system[1].text
     assert.ok(text.startsWith("<self-improving>") && text.endsWith("</self-improving>"))
     assert.ok(text.length <= 4096, String(text.length))
-    assert.ok(text.includes("1 unprocessed event "), text.slice(-300))
+    assert.ok(text.includes("1 unprocessed event."), text.slice(-300))
     await p.hooks["session:context"](ev)
     assert.equal(ev.system.length, 2)
   } finally {
@@ -434,8 +434,52 @@ test("unacked count skips day files older than the ack date", async () => {
   try {
     const ev = { sessionID: "ses_1", system: [] }
     await p.hooks["session:context"](ev)
-    assert.ok(ev.system[0].text.includes("1 unprocessed event "), ev.system[0]?.text)
-    assert.ok(ev.system[0].text.includes("Triage with the self-improving skill at a natural pause"))
+    assert.ok(ev.system[0].text.includes("Inbox: 1 unprocessed event. The nightly `learn dream` triages them"), ev.system[0]?.text)
+    assert.ok(!ev.system[0].text.includes("Triage with the self-improving skill"))
+    assert.ok(!ev.system[0].text.includes("Proposed, waiting"))
+  } finally {
+    p.cleanup()
+    rmSync(fx.root, { recursive: true, force: true })
+  }
+})
+
+test("context injection lists proposed candidate keys from the store", async () => {
+  const fx = fixture()
+  const cands = join(fx.store, "work", "candidates")
+  mkdirSync(cands, { recursive: true })
+  const cand = (status, extra = "") =>
+    `---\ndescription: d\npattern-key: k\nkind: correction\nseen: 3\nstatus: ${status}\n---\n## Future behavior\nx\n${extra}`
+  writeFileSync(join(cands, "test.zeta.md"), cand("proposed"))
+  writeFileSync(join(cands, "Test.upper.md"), cand("proposed"))
+  writeFileSync(join(cands, "test.alpha.md"), cand("proposed"))
+  writeFileSync(join(cands, "test.plain.md"), cand("candidate"))
+  // `status: proposed` outside the first frontmatter block does not count.
+  writeFileSync(join(cands, "test.body.md"), cand("candidate", "\nstatus: proposed\n"))
+  writeFileSync(join(cands, "notes.txt"), cand("proposed"))
+  writeFileSync(join(fx.store, "work", "INDEX.md"), "# Index\n- [test.plain](candidates/test.plain.md) — correction ×1: d\n")
+  const p = await start(fx)
+  try {
+    const ev = { sessionID: "ses_1", system: [] }
+    await p.hooks["session:context"](ev)
+    const text = ev.system[0].text
+    assert.ok(text.includes("Proposed, waiting for the user's decision (3): Test.upper, test.alpha, test.zeta\n"), text)
+    assert.ok(text.includes("At a natural pause (end of a task), offer the proposed candidates"))
+    assert.ok(!text.includes("Inbox:"))
+  } finally {
+    p.cleanup()
+    rmSync(fx.root, { recursive: true, force: true })
+  }
+})
+
+test("context injection without a candidates directory has no proposed line", async () => {
+  const fx = fixture()
+  writeFileSync(join(fx.store, "work", "INDEX.md"), "# Index\n- [a.b](candidates/a.b.md) — correction ×1: d\n")
+  const p = await start(fx)
+  try {
+    const ev = { sessionID: "ses_1", system: [] }
+    await p.hooks["session:context"](ev)
+    assert.ok(ev.system[0].text.includes("Candidates (1):"))
+    assert.ok(!ev.system[0].text.includes("Proposed, waiting"))
   } finally {
     p.cleanup()
     rmSync(fx.root, { recursive: true, force: true })

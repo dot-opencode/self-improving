@@ -1,16 +1,16 @@
 ---
 name: self-improving
-description: Turn repeated agent mistakes and user corrections into a durable behavior change (script, skill patch, new skill, or AGENTS.md suggestion). Use after a user correction ("нет, я про другое", "no, stop", "I said…"), after a repeated tool failure, on "запомни урок", "разбери inbox", "/learn", "learn from this", and at a natural pause (end of a task) when the context contains a `<self-improving>` block with unprocessed events > 0. Never mid-task.
+description: Turn repeated agent mistakes and user corrections into a durable behavior change (script, skill patch, new skill, or AGENTS.md suggestion). Use after a user correction ("нет, я про другое", "no, stop", "I said…"), on "запомни урок" / remember, on "разбери inbox" / "/learn", and at a natural pause (end of a task) when the `<self-improving>` block lists proposed candidates. Never mid-task.
 license: MIT
 ---
 
 # Self-Improving
 
 Learnings are raw material for **behavior change**, not knowledge. A plugin
-captures signals into `.learnings/inbox`; you triage them, count repeats by a
-stable key, and — only after the user approves — promote a repeated lesson into
-exactly one durable owner. Once `applied`, the lesson lives in that owner, not in
-context.
+captures signals into `.learnings/inbox`; the nightly `learn dream` triages them,
+counts repeats by a stable key and prepares proposals. In a session you present
+`proposed` candidates and — only after the user approves — apply one into exactly
+one durable owner. Once `applied`, the lesson lives in that owner, not in context.
 
 Facts about a project ("service X uses port 5432") belong to `agent-memory`, not here.
 
@@ -19,11 +19,11 @@ suggest `learn init <profile>` to the user, but never run it yourself.
 
 ## When
 
-- The user corrected you ("нет", "не так", "я же просил", "no, stop", "I said…").
-- The same tool failure happened again in this session or across sessions.
-- The user says "запомни урок", "разбери inbox", "/learn", "learn from this".
-- A large task just finished — do a short triage while context is fresh.
-- Your context contains `<self-improving>` with `N unprocessed events` (N > 0) **and** you are at a natural pause. Do not interrupt a task to triage.
+- The user corrected you ("нет", "не так", "я же просил", "no, stop", "I said…"): fix the behavior now, in the conversation. The plugin already recorded the correction and the nightly dream triages it. Do not record it yourself.
+- The user asks you to remember a lesson or states a standing rule ("запомни / всегда / никогда / always / never / remember"): record it yourself with `learn add|bump … --date <today>`.
+- The user says "разбери inbox" or "/learn": run the Triage section below.
+- Your context contains `<self-improving>` with a `Proposed, waiting for the user's decision` line **and** you are at a natural pause (end of a task): offer the proposed candidates (see Start Packet / Proposal). Never mid-task.
+- Never triage the inbox on your own initiative; that is dream's job.
 
 ## Never
 
@@ -42,18 +42,27 @@ suggest `learn init <profile>` to the user, but never run it yourself.
 If a `<self-improving>` block is already in your context (the OpenCode plugin
 injects it), do not re-read `INDEX.md`. It has:
 
-- one line per candidate: `- [key](candidates/key.md) — kind ×seen: description`;
-- `N unprocessed events in .learnings/inbox`;
-- a reminder that triage is done by this skill.
+- `Candidates (N):` and one line per candidate: `- [key](candidates/key.md) — kind ×seen: description`;
+- `Proposed, waiting for the user's decision (P): k1, k2` — only when P > 0 (at most 10 keys, then `, …`); these are the candidates to offer the user;
+- `Inbox: M unprocessed events. The nightly `learn dream` triages them…` — only when M > 0; informational, do not triage it;
+- an offer reminder — only when P > 0: at a natural pause (end of a task), offer the proposed candidates. Never mid-task.
 
 Otherwise run `learn status` and read `.learnings/INDEX.md` by path (search
 tools do not see `.learnings/`; it is a gitignored symlink).
 
-Read events with `learn inbox` (compact, one line per event; only events after the
-last `learn ack`). Useful flags: `--since <ISO>`, `--kind failure|correction|confirmation`,
-`--tier strong|medium|weak`, `--all`, `--json`.
+To present a proposed candidate, read `.learnings/candidates/<key>.md` (its
+`## Proposal` section was prepared by dream) and show it as in Start Packet / Proposal.
 
-## Triage
+## Triage (only when the user asks)
+
+Triage runs in batches; never dump the whole inbox into context.
+
+1. `learn inbox --limit 200` (compact, one line per event; only events after the last `learn ack`). Other flags: `--since <ISO>`, `--kind failure|correction|confirmation`, `--tier strong|medium|weak`, `--all`, `--json`.
+2. Triage that batch (below).
+3. Run the `learn ack --until <ts>` command printed in the trailer of `learn inbox`, so events that arrived meanwhile stay unprocessed.
+4. Repeat until `learn inbox` prints `(no events)`.
+
+Never run `inbox` and `ack` in parallel: one after another, or you see the same batch twice.
 
 For each inbox event decide: **noise**, `learn bump <key>`, `learn add …`, or **nothing**.
 
@@ -68,9 +77,9 @@ Then:
 
 - Pick a `pattern-key` = `area.symptom` (kebab-case). Area vocabulary and examples:
   `references/pattern-keys.md`. Run `learn grep <symptom>` first to find an existing key.
-- Existing key → `learn bump <key> --evidence "…" [--project p]`. New → `learn add --key … --kind … --summary "<≤120>" --evidence "…"`.
-- Write evidence as a redacted one-liner: what happened and what the user wanted. No quotes with profanity, no secrets.
-- After processing the batch, run the `learn ack --until <ts>` command that `learn inbox` printed as its trailer, so events that arrived meanwhile stay unprocessed.
+- Existing key → `learn bump <key> --evidence "…" [--project p] --date <day>`. New → `learn add --key … --kind … --summary "<≤120>" --evidence "…" --date <day>`.
+- Pass `--date` (`YYYY-MM-DD`) from each event's `ts`, not today's date.
+- Evidence is the text only: the CLI adds the date and project prefix (`<date> <project>: `). Write it as a redacted one-liner: what happened and what the user wanted. No quotes with profanity, no secrets.
 
 ## Promotion threshold
 
@@ -163,15 +172,19 @@ Never put profanity or personal phrasing into skills or rules. Markers are perso
 `learn` from PATH, otherwise `<this skill's directory>/bin/learn`.
 
 ```
+learn [--profile <p>] <command>      # --profile must be the FIRST argument (needed outside a project with .learnings)
 learn init <profile>                 # user-only; never run yourself
 learn status | doctor | index | grep <pattern>
-learn inbox [--since ts] [--kind k] [--tier t] [--all] [--json]
+learn inbox [--limit N] [--since ts] [--kind k] [--tier t] [--all] [--json]
 learn ack [--until ts]
-learn add --key <k> --kind <k> --summary "<≤120>" --evidence "<…>" [--project <p>]
-learn bump <key> --evidence "<…>" [--project <p>]
+learn add --key <k> --kind <k> --summary "<≤120>" --evidence "<…>" [--project <p>] [--date YYYY-MM-DD]
+learn bump <key> --evidence "<…>" [--project <p>] [--date YYYY-MM-DD]
+learn add|bump|reject --from <draft>   # flat `field: value` draft file instead of flags
 learn propose <key> [--owner <o>]
 learn apply <key> --owner <o> --change-ref <ref>
 learn reject <key> --reason "<…>"
+learn dream --report                 # read-only summary of what dream would look at
+learn dream [--if-changed] [--model m]   # the nightly job (unattended agent run); not for in-session use
 learn prune [--days 90]              # seen=1 and stale → rejected/
 learn markers list | add --tier <t> "<re>" | test "<text>"
 learn backup [--push] | install-opencode | --version

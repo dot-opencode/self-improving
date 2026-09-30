@@ -132,6 +132,12 @@ test("prompt: date field from the event ts, evidence without prefix", () => {
   assert.match(prompt, /`bump`: key, evidence, project, date/);
 });
 
+test("prompt: sequential inbox/ack and duplicate-evidence check before bump", () => {
+  assert.match(prompt, /`inbox` and `ack` one after another, never in parallel/);
+  assert.match(prompt, /before a `bump`, read the candidate's evidence/);
+  assert.match(prompt, /same date and project/);
+});
+
 test("sandbox simulation: --from drafts and plain commands allowed, free text and apply denied", () => {
   const rendered = JSON.parse(
     JSON.stringify(template)

@@ -8,9 +8,12 @@ script, a skill patch, a new skill, or (as a suggestion only) an `AGENTS.md` lin
 
 - The plugin deterministically captures signals into an inbox: tool failures and
   user corrections/confirmations (matched by RU/EN regex markers).
-- The `self-improving` skill triages the inbox, counts repeats by a stable
-  `pattern-key`, and proposes a change with an explicit owner, layer, write
-  boundary, diff, and proof. Nothing is changed without user approval.
+- The nightly `learn dream` triages the inbox, counts repeats by a stable
+  `pattern-key`, and prepares proposals with an explicit owner, layer, write
+  boundary, diff, and proof. The plugin injects the list of `proposed` candidates
+  into sessions; the `self-improving` skill presents them at a natural pause and
+  applies one only after user approval. In-session triage of the inbox happens
+  only when you ask for it ("разбери inbox", `/learn`).
 - Once applied, the lesson lives in its owner — not in context — and the candidate
   stops growing.
 

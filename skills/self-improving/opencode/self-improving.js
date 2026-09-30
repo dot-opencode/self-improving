@@ -1,6 +1,6 @@
 import { spawn as nodeSpawn } from "node:child_process"
 import { realpathSync } from "node:fs"
-import { appendFile, mkdir, readdir, readFile, readlink, realpath } from "node:fs/promises"
+import { appendFile, mkdir, open, readdir, readFile, readlink, realpath } from "node:fs/promises"
 import { homedir } from "node:os"
 import { basename, dirname, join, resolve, sep } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -30,6 +30,7 @@ const BACKUP_EVENTS = new Set(["session.execution.succeeded", "session.execution
 const INERT_RECHECK_MS = 10_000
 const SESSIONS_CAP = 200
 const DEDUPE_CAP = 500
+const HEAD_BYTES = 2048
 const PROFILE_RE = /^[a-z0-9][a-z0-9-]*$/
 
 const debugEnabled = () => process.env.SELF_IMPROVING_DEBUG === "1"
@@ -263,6 +264,34 @@ export default {
       return count
     }
 
+    // Keys of candidates whose first frontmatter block says `status: proposed`.
+    // Only the head of each file is read. Byte-order sort (like LC_ALL=C).
+    async function proposedKeys(state) {
+      try {
+        const dir = join(state.dir, "candidates")
+        const names = (await readdir(dir)).filter((name) => name.endsWith(".md"))
+        const keys = []
+        for (const name of names) {
+          let handle
+          try {
+            handle = await open(join(dir, name), "r")
+            const buffer = Buffer.alloc(HEAD_BYTES)
+            const { bytesRead } = await handle.read(buffer, 0, HEAD_BYTES, 0)
+            const head = buffer.toString("utf8", 0, bytesRead).replace(/\r\n/g, "\n")
+            const match = head.match(/^---\n([\s\S]*?)\n---(?:\n|$)/)
+            if (match && /^status:[ \t]*proposed[ \t]*$/m.test(match[1])) keys.push(name.slice(0, -".md".length))
+          } catch {
+            // Unreadable candidate: skip it.
+          } finally {
+            await handle?.close().catch(() => {})
+          }
+        }
+        return keys.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
+      } catch {
+        return []
+      }
+    }
+
     async function onContext(ev) {
       try {
         if (!Array.isArray(ev?.system)) return
@@ -275,7 +304,13 @@ export default {
         } catch {
           // No INDEX yet.
         }
-        const text = buildInjection(index, await unackedCount(state))
+        let proposed = []
+        try {
+          proposed = await proposedKeys(state)
+        } catch {
+          proposed = []
+        }
+        const text = buildInjection(index, await unackedCount(state), proposed)
         if (!text) return
         if (ev.system.some((part) => typeof part?.text === "string" && part.text.includes(OPEN))) return
         ev.system.push({ type: "text", text })

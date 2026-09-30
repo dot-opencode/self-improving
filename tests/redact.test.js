@@ -103,10 +103,60 @@ test("detectToolFailure: traceback head includes last line", () => {
   assert.equal(detectToolFailure({ status: "completed", tool: "bash", result: out })?.head, "Traceback (most recent call last):: ValueError: bad")
 })
 
-test("buildInjection tells the agent when to triage", () => {
+test("buildInjection leaves inbox triage to dream", () => {
   const text = buildInjection("", 1)
-  assert.ok(text.includes("Triage with the self-improving skill at a natural pause (end of task or right after a user correction), not mid-task."))
-  assert.ok(!text.includes("unprompted"))
+  assert.ok(text.includes("Inbox: 1 unprocessed event. The nightly `learn dream` triages them; do not triage the inbox in-session unless the user asks."))
+  assert.ok(!text.includes("Triage with the self-improving skill"))
+  assert.ok(!text.includes("Proposed, waiting"))
+  assert.ok(!text.includes("At a natural pause"))
+})
+
+test("buildInjection: exact layout with candidates, proposed and inbox", () => {
+  const idx = "# idx\n- [a.b](candidates/a.b.md) — correction ×2: do x\n"
+  assert.equal(
+    buildInjection(idx, 3, ["a.b", "c.d"]),
+    [
+      "<self-improving>",
+      "Behavior learnings for this project live in ./.learnings (managed by the `learn` CLI).",
+      "Candidates (1):",
+      "- [a.b](candidates/a.b.md) — correction ×2: do x",
+      "Proposed, waiting for the user's decision (2): a.b, c.d",
+      "Inbox: 3 unprocessed events. The nightly `learn dream` triages them; do not triage the inbox in-session unless the user asks.",
+      "At a natural pause (end of a task), offer the proposed candidates to the user with the self-improving skill. Never mid-task.",
+      "</self-improving>",
+    ].join("\n"),
+  )
+})
+
+test("buildInjection: proposed and offer lines only when P > 0", () => {
+  const idx = "- [a.b](candidates/a.b.md) — correction ×2: do x\n"
+  for (const keys of [undefined, []]) {
+    const none = buildInjection(idx, 0, keys)
+    assert.ok(!none.includes("Proposed, waiting"))
+    assert.ok(!none.includes("At a natural pause"))
+    assert.ok(!none.includes("Inbox:"))
+  }
+  const some = buildInjection(idx, 0, ["a.b"])
+  assert.ok(some.includes("Proposed, waiting for the user's decision (1): a.b\n"))
+  assert.ok(some.includes("At a natural pause (end of a task), offer the proposed candidates"))
+  assert.ok(!some.includes("Inbox:"))
+  assert.equal(buildInjection("", 0, ["a.b"]), undefined)
+})
+
+test("buildInjection: proposed list is capped at 10 keys with an ellipsis", () => {
+  const keys = Array.from({ length: 12 }, (_, i) => `k${i + 1}`)
+  const text = buildInjection("", 1, keys)
+  assert.ok(text.includes("(12): k1, k2, k3, k4, k5, k6, k7, k8, k9, k10, …\n"), text)
+  assert.ok(!text.includes("k11"))
+  const ten = buildInjection("", 1, keys.slice(0, 10))
+  assert.ok(ten.includes("(10): k1, k2, k3, k4, k5, k6, k7, k8, k9, k10\n"), ten)
+  assert.ok(!ten.includes("…"))
+})
+
+test("buildInjection: inbox line uses singular and plural", () => {
+  assert.ok(buildInjection("", 1).includes("Inbox: 1 unprocessed event. "))
+  assert.ok(buildInjection("", 2).includes("Inbox: 2 unprocessed events. "))
+  assert.ok(!buildInjection("- [a](candidates/a.md) — x\n", 0).includes("Inbox:"))
 })
 
 test("buildInjection", () => {
@@ -114,7 +164,7 @@ test("buildInjection", () => {
   const one = buildInjection("# idx\n- [a.b](candidates/a.b.md) — correction ×2: do x\n", 3)
   assert.ok(one.startsWith("<self-improving>") && one.endsWith("</self-improving>"))
   assert.ok(one.includes("a.b") && one.includes("3 unprocessed"))
-  assert.ok(buildInjection("", 1).includes("1 unprocessed event "))
+  assert.ok(buildInjection("", 1).includes("1 unprocessed event."))
 
   const many = Array.from({ length: 500 }, (_, i) => `- [test.k${i}](candidates/test.k${i}.md) — correction ×2: ${"d".repeat(60)}`).join("\n")
   const big = buildInjection(many, 5)
