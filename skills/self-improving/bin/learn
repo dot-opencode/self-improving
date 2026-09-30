@@ -31,12 +31,21 @@ commands:
   inbox [--since <ts>] [--kind k] [--tier t] [--all] [--json] [--limit N]
                                             show plugin events (unacked by default)
   ack [--until <ts>]                        mark the inbox as processed
-  add --key <area.symptom> --kind <k> --summary "<=120" --evidence "..." [--project p] [--behavior "..."] [--owner o]
-                                            create a candidate (seen: 1)
-  bump <key> --evidence "..." [--project p] another sighting of a candidate
+  add --key <area.symptom> --kind <k> --summary "<=120" --evidence "..." [--project p] [--behavior "..."] [--owner o] [--date YYYY-MM-DD]
+  add --from <file> [flags]                 create a candidate (seen: 1); the draft holds flat
+                                            `field: value` lines (key kind summary evidence project
+                                            behavior owner date); flags override it; a draft inside
+                                            <store>/.drafts/ is deleted after success.
+                                            --date is the event date (default today): it prefixes
+                                            the evidence line and sets first-seen/last-seen
+  bump <key> --evidence "..." [--project p] [--date YYYY-MM-DD]
+                                            another sighting of a candidate (first-seen = min,
+                                            last-seen = max of the dates)
+  bump [<key>] --from <file> [flags]        same, from a draft (key evidence project date)
   propose <key> [--owner <o>]               status: proposed
   apply <key> --owner <o> --change-ref <r>  move to applied/ (only after user approval)
   reject <key> --reason "..."               move to rejected/
+  reject [<key>] --from <file> [--reason r] same, from a draft (key reason)
   index                                     rebuild INDEX.md from candidates/
   status                                    profile, counts, unacked inbox, git state
   doctor                                    check symlink, frontmatter, index, markers
@@ -420,6 +429,7 @@ cmd_init() {
   fi
 
   if [ ! -d "$STORE_HOME/.git" ]; then git -C "$STORE_HOME" init -q; fi
+  ensure_store_excludes
   mkdir -p "$pdir/inbox" "$pdir/candidates" "$pdir/applied" "$pdir/rejected"
   [ -f "$pdir/INDEX.md" ] || : > "$pdir/INDEX.md"
 
@@ -578,10 +588,36 @@ project_listed() {   # project_listed <list "[a, b]"> <project>
   return 1
 }
 
+# --from <file> drafts: flat `field: value` lines (first match per field, value =
+# everything after the first ": "). Keeps free text out of the shell command line.
+draft_load() {   # draft_load <file>: die unless it is a readable regular file
+  [ -f "$1" ] && [ -r "$1" ] || die "cannot read draft file: $1"
+}
+
+draft_fill() {   # draft_fill <file> <var> <field>: set <var> from the draft when it is empty
+  [ -z "${!2}" ] || return 0
+  local v
+  v="$(awk -v k="$3" 'index($0, k ": ") == 1 { print substr($0, length(k) + 3); exit }' "$1")"
+  printf -v "$2" '%s' "$v"
+}
+
+# Delete the draft after success, only when it lives in $STORE_HOME/.drafts/.
+draft_cleanup() {   # draft_cleanup <file>
+  local real
+  real="$(canonical_path "$1" 2>/dev/null)" || return 0
+  case "$real" in
+    "$STORE_HOME/.drafts/"*) rm -f -- "$real" ;;
+  esac
+  return 0
+}
+
 cmd_add() {
-  local key="" kind="" summary="" evidence="" project="" behavior="" owner=""
+  local key="" kind="" summary="" evidence="" project="" behavior="" owner="" from="" date=""
+  local addusage='usage: learn add --key <area.symptom> --kind <k> --summary "<=120" --evidence "..." [--project p] [--behavior "..."] [--owner o] [--date YYYY-MM-DD] | --from <file>'
   while [ $# -gt 0 ]; do
     case "$1" in
+      --from) [ $# -ge 2 ] || die "--from requires a value"; from="$2"; shift 2 ;;
+      --date) [ $# -ge 2 ] || die "--date requires a value"; date="$2"; shift 2 ;;
       --key) [ $# -ge 2 ] || die "--key requires a value"; key="$2"; shift 2 ;;
       --kind) [ $# -ge 2 ] || die "--kind requires a value"; kind="$2"; shift 2 ;;
       --summary) [ $# -ge 2 ] || die "--summary requires a value"; summary="$2"; shift 2 ;;
@@ -589,11 +625,19 @@ cmd_add() {
       --project) [ $# -ge 2 ] || die "--project requires a value"; project="$2"; shift 2 ;;
       --behavior) [ $# -ge 2 ] || die "--behavior requires a value"; behavior="$2"; shift 2 ;;
       --owner) [ $# -ge 2 ] || die "--owner requires a value"; owner="$2"; shift 2 ;;
-      *) die "usage: learn add --key <area.symptom> --kind <k> --summary \"<=120\" --evidence \"...\" [--project p] [--behavior \"...\"] [--owner o]" ;;
+      *) die "$addusage" ;;
     esac
   done
+  if [ -n "$from" ]; then
+    draft_load "$from"
+    local f
+    for f in key kind summary evidence project behavior owner date; do draft_fill "$from" "$f" "$f"; done
+    key="$(oneline "$key")"; kind="$(oneline "$kind")"; project="$(oneline "$project")"
+  fi
+  date="$(oneline "$date")"
+  if [ -n "$date" ]; then valid_calendar_date "$date" || die "invalid date '$date': use YYYY-MM-DD"; fi
   [ -n "$key" ] && [ -n "$kind" ] && [ -n "$summary" ] && [ -n "$evidence" ] \
-    || die "usage: learn add --key <area.symptom> --kind <k> --summary \"<=120\" --evidence \"...\" [--project p]"
+    || die "$addusage"
   resolve_profile
   validate_key "$key"
   in_list "$kind" "$KINDS" || die "invalid kind '$kind': use one of: $KINDS"
@@ -627,7 +671,7 @@ cmd_add() {
   esac
 
   local day tmp
-  day="$(today)"
+  day="${date:-$(today)}"
   tmp="$(mk_tmp "$PDIR/candidates")"
   {
     echo "---"
@@ -650,19 +694,31 @@ cmd_add() {
   mv "$tmp" "$PDIR/candidates/$key.md"
   write_index
   echo "added candidates/$key.md"
+  if [ -n "$from" ]; then draft_cleanup "$from"; fi
 }
 
 cmd_bump() {
-  local key="" evidence="" project=""
+  local key="" evidence="" project="" from="" date=""
+  local bumpusage='usage: learn bump <key> --evidence "..." [--project p] [--date YYYY-MM-DD] | --from <file>'
   while [ $# -gt 0 ]; do
     case "$1" in
+      --from) [ $# -ge 2 ] || die "--from requires a value"; from="$2"; shift 2 ;;
+      --date) [ $# -ge 2 ] || die "--date requires a value"; date="$2"; shift 2 ;;
       --evidence) [ $# -ge 2 ] || die "--evidence requires a value"; evidence="$2"; shift 2 ;;
       --project) [ $# -ge 2 ] || die "--project requires a value"; project="$2"; shift 2 ;;
       -*) die "unknown option: $1" ;;
-      *) [ -z "$key" ] || die "usage: learn bump <key> --evidence \"...\" [--project p]"; key="$1"; shift ;;
+      *) [ -z "$key" ] || die "$bumpusage"; key="$1"; shift ;;
     esac
   done
-  [ -n "$key" ] && [ -n "$evidence" ] || die "usage: learn bump <key> --evidence \"...\" [--project p]"
+  if [ -n "$from" ]; then
+    draft_load "$from"
+    draft_fill "$from" key key; draft_fill "$from" evidence evidence; draft_fill "$from" project project
+    draft_fill "$from" date date
+    key="$(oneline "$key")"; project="$(oneline "$project")"
+  fi
+  date="$(oneline "$date")"
+  if [ -n "$date" ]; then valid_calendar_date "$date" || die "invalid date '$date': use YYYY-MM-DD"; fi
+  [ -n "$key" ] && [ -n "$evidence" ] || die "$bumpusage"
   resolve_profile
   valid_key "$key" || die "invalid key '$key'"
   evidence="$(oneline "$evidence")"
@@ -685,9 +741,15 @@ cmd_bump() {
   f="$PDIR/candidates/$key.md"
   seen="$(fm_get "$f" seen)"
   is_uint "$seen" || die "candidate $key has invalid seen: '$seen' (run 'learn doctor')"
-  day="$(today)"
+  day="${date:-$(today)}"
+  local first last
+  first="$(fm_get "$f" first-seen)"; last="$(fm_get "$f" last-seen)"
+  # ISO dates order lexicographically: first-seen = min, last-seen = max.
+  if ! valid_calendar_date "$first" || [[ "$day" < "$first" ]]; then first="$day"; fi
+  if ! valid_calendar_date "$last" || [[ "$day" > "$last" ]]; then last="$day"; fi
   fm_set "$f" seen "$((seen + 1))"
-  fm_set "$f" last-seen "$day"
+  fm_set "$f" first-seen "$first"
+  fm_set "$f" last-seen "$last"
   projects="$(fm_get "$f" projects)"
   if ! project_listed "$projects" "$project"; then
     projects="${projects#\[}"; projects="${projects%\]}"
@@ -697,6 +759,7 @@ cmd_bump() {
   append_evidence "$f" "- $day $project: $evidence"
   write_index
   echo "bumped $key (seen: $((seen + 1)))"
+  if [ -n "$from" ]; then draft_cleanup "$from"; fi
 }
 
 cmd_propose() {
@@ -755,15 +818,22 @@ cmd_apply() {
 }
 
 cmd_reject() {
-  local key="" reason=""
+  local key="" reason="" from=""
+  local rejusage='usage: learn reject <key> --reason "..." | --from <file>'
   while [ $# -gt 0 ]; do
     case "$1" in
+      --from) [ $# -ge 2 ] || die "--from requires a value"; from="$2"; shift 2 ;;
       --reason) [ $# -ge 2 ] || die "--reason requires a value"; reason="$2"; shift 2 ;;
       -*) die "unknown option: $1" ;;
-      *) [ -z "$key" ] || die "usage: learn reject <key> --reason \"...\""; key="$1"; shift ;;
+      *) [ -z "$key" ] || die "$rejusage"; key="$1"; shift ;;
     esac
   done
-  [ -n "$key" ] && [ -n "$reason" ] || die "usage: learn reject <key> --reason \"...\""
+  if [ -n "$from" ]; then
+    draft_load "$from"
+    draft_fill "$from" key key; draft_fill "$from" reason reason
+    key="$(oneline "$key")"
+  fi
+  [ -n "$key" ] && [ -n "$reason" ] || die "$rejusage"
   resolve_profile
   valid_key "$key" || die "invalid key '$key'"
   reason="$(oneline "$reason")"
@@ -775,6 +845,7 @@ cmd_reject() {
   mv "$f" "$PDIR/rejected/$key.md"
   write_index
   echo "rejected $key"
+  if [ -n "$from" ]; then draft_cleanup "$from"; fi
 }
 
 cmd_prune() {
@@ -1399,6 +1470,18 @@ dream_render() {   # dream_render <template> <store> <learn-bin> <home>
   '
 }
 
+# Keep local bookkeeping out of the store's commits via .git/info/exclude.
+ensure_store_excludes() {
+  local p ex="$STORE_HOME/.git/info/exclude"
+  mkdir -p "$STORE_HOME/.git/info"
+  for p in /.dream-last /.drafts/; do
+    if ! grep -qxF "$p" "$ex" 2>/dev/null; then
+      if [ -s "$ex" ] && [ -n "$(tail -c 1 "$ex")" ]; then printf '\n' >> "$ex"; fi
+      printf '%s\n' "$p" >> "$ex"
+    fi
+  done
+}
+
 # Stage everything and commit; returns 1 when there was nothing to commit.
 dream_commit() {   # dream_commit <message>
   git -C "$STORE_HOME" add -A
@@ -1490,12 +1573,8 @@ cmd_dream() {
   [ -d "$STORE_HOME/.git" ] || die "store at $STORE_HOME is not a git repository (ask the user to run: learn init <profile>)"
   command -v opencode >/dev/null 2>&1 || die "opencode not found on PATH"
 
-  # .dream-last is local bookkeeping: keep it out of the store's commits.
-  mkdir -p "$STORE_HOME/.git/info"
-  if ! grep -qxF '/.dream-last' "$STORE_HOME/.git/info/exclude" 2>/dev/null; then
-    printf '/.dream-last\n' >> "$STORE_HOME/.git/info/exclude"
-  fi
-
+  # .dream-last and .drafts/ are local bookkeeping: keep them out of the store's commits.
+  ensure_store_excludes
   # Commit pending changes first so the dream result is its own revertable commit.
   if [ -n "$(git -C "$STORE_HOME" status --porcelain --untracked-files=all)" ]; then
     dream_commit "learn: pre-dream snapshot" || true
@@ -1533,6 +1612,10 @@ cmd_dream() {
   local summary p
   summary="$(dream_summary_line "$outfile")"
   rm -f "$outfile"
+  # Leftover drafts (agent scratch files) never outlive the run.
+  if [ -d "$STORE_HOME/.drafts" ]; then
+    find "$STORE_HOME/.drafts" -mindepth 1 -delete 2>/dev/null || true
+  fi
   [ -n "$summary" ] || summary="consolidated"
 
   # Rebuild every profile's INDEX.md before the final commit.

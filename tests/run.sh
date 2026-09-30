@@ -171,6 +171,104 @@ check "rejected status" test "$(fmval "$R" status)" = "rejected"
 check "rejected reason" test "$(fmval "$R" reason)" = "environment specific"
 expect_die "bump on rejected dies" "rejected" bump shell.no-sudo --evidence "x"
 
+# --- --from drafts ----------------------------------------------------------
+mkdir -p "$STORE/.drafts"
+EVV='lacked packaging; project uses uv | a & b > c -> commit push revert'
+cat > "$STORE/.drafts/d1.md" <<EOF
+key: git.draft-one
+kind: failure
+summary: committed without tests: pushed to the wrong branch
+evidence: $EVV
+project: proj-d
+behavior: Run tests before any commit; check the branch first.
+owner: skill:git
+EOF
+expect_ok "add --from draft" add --from "$STORE/.drafts/d1.md"
+D="$PDIR/candidates/git.draft-one.md"
+check "add --from: file created" test -f "$D"
+check "add --from: summary keeps ': ' after first" test "$(fmval "$D" description)" = "committed without tests: pushed to the wrong branch"
+check "add --from: project" test "$(fmval "$D" projects)" = "[proj-d]"
+check "add --from: owner" test "$(fmval "$D" suggested-owner)" = "skill:git"
+check "add --from: evidence stored verbatim, one line" test "$(grep -c -F -- "- $(date +%Y-%m-%d) proj-d: $EVV" "$D")" = "1"
+check "add --from: evidence line is the only one" test "$(grep -c '^- [0-9]\{4\}-' "$D")" = "1"
+check "draft inside .drafts/ deleted after success" test ! -e "$STORE/.drafts/d1.md"
+
+printf 'key: git.draft-two\nkind: workflow\nsummary: outside draft\nevidence: e2\n' > "$TMP/outside-draft.md"
+expect_ok "add --from draft outside .drafts" add --from "$TMP/outside-draft.md"
+check "draft outside .drafts/ kept" test -f "$TMP/outside-draft.md"
+
+# relative path resolves against $PWD; flags override the draft; ---block tolerated
+mkdir -p "$TMP/rel"
+printf -- '---\nkey: git.draft-three\nkind: workflow\nsummary: from draft\nevidence: from draft evidence\nevidence: second match ignored\n---\n' > "$TMP/rel/d3.md"
+( cd "$TMP/rel" && AGENT_LEARNINGS_HOME="$STORE" LEARN_PROJECT=proj-a "$LEARN" add --profile work --from d3.md --summary "from flag" --kind correction >/dev/null 2>&1 ); RC=$?
+T3="$PDIR/candidates/git.draft-three.md"
+if [ "$RC" -eq 0 ] && [ -f "$T3" ]; then pass "add --from relative path (leading --- tolerated)"; else fail "add --from relative path" "exit $RC"; fi
+check "flag overrides draft summary" test "$(fmval "$T3" description)" = "from flag"
+check "flag overrides draft kind" test "$(fmval "$T3" kind)" = "correction"
+check "draft first match per field wins" grep -q 'proj-a: from draft evidence$' "$T3"
+
+expect_die "add --from missing file dies" "cannot read draft" add --from "$TMP/nope.md"
+expect_die "bump --from missing file dies" "cannot read draft" bump --from "$TMP/nope.md"
+expect_die "reject --from missing file dies" "cannot read draft" reject --from "$TMP/nope.md"
+
+printf 'key: git.draft-three\nevidence: %s\nproject: proj-e\n' "$EVV" > "$STORE/.drafts/b1.md"
+expect_ok "bump --from draft (key from draft)" bump --from "$STORE/.drafts/b1.md"
+check "bump --from: seen 2" test "$(fmval "$T3" seen)" = "2"
+check "bump --from: project added" test "$(fmval "$T3" projects)" = "[proj-a, proj-e]"
+check "bump --from: evidence verbatim" grep -qF -- "proj-e: $EVV" "$T3"
+check "bump --from: draft deleted" test ! -e "$STORE/.drafts/b1.md"
+
+printf 'key: git.draft-three\nevidence: draft ev\n' > "$STORE/.drafts/b2.md"
+expect_ok "bump positional key overrides draft" bump git.draft-one --from "$STORE/.drafts/b2.md" --evidence "flag ev"
+check "bump override: positional key bumped" test "$(fmval "$D" seen)" = "2"
+check "bump override: flag evidence used" grep -q 'flag ev$' "$D"
+
+printf 'key: git.draft-one\nreason: wrong: %s\n' "$EVV" > "$STORE/.drafts/r1.md"
+expect_ok "reject --from draft" reject --from "$STORE/.drafts/r1.md"
+check "reject --from: moved" test -f "$PDIR/rejected/git.draft-one.md" -a ! -f "$D"
+check "reject --from: reason stored" test "$(fmval "$PDIR/rejected/git.draft-one.md" reason)" = "wrong: $EVV"
+check "reject --from: draft deleted" test ! -e "$STORE/.drafts/r1.md"
+
+printf 'key: git.draft-three\nreason: from draft\n' > "$STORE/.drafts/r2.md"
+expect_ok "reject flag reason overrides draft" reject --from "$STORE/.drafts/r2.md" --reason "from flag"
+check "reject override: reason from flag" test "$(fmval "$PDIR/rejected/git.draft-three.md" reason)" = "from flag"
+rm -f "$PDIR/rejected/git.draft-three.md" "$PDIR/candidates/git.draft-two.md"
+run index
+
+# --- --date / date: (event date instead of today) ----------------------------
+export LEARN_TODAY=2026-09-30
+printf 'key: git.dated\nkind: failure\nsummary: dated event\nevidence: old event text\ndate: 2026-07-22\nproject: proj-a\n' > "$STORE/.drafts/dd1.md"
+expect_ok "add --from with date:" add --from "$STORE/.drafts/dd1.md"
+DD="$PDIR/candidates/git.dated.md"
+check "add date: first-seen is the event date" test "$(fmval "$DD" first-seen)" = "2026-07-22"
+check "add date: last-seen is the event date" test "$(fmval "$DD" last-seen)" = "2026-07-22"
+check "add date: evidence prefixed once with event date" test "$(grep -c '^- ' "$DD")" = "1" -a "$(grep '^- ' "$DD")" = "- 2026-07-22 proj-a: old event text"
+expect_ok "add --date flag overrides draft date" add --key git.dated-flag --kind failure --summary s --evidence e --date 2026-08-01
+check "add --date: first/last-seen" test "$(fmval "$PDIR/candidates/git.dated-flag.md" first-seen)" = "2026-08-01" -a "$(fmval "$PDIR/candidates/git.dated-flag.md" last-seen)" = "2026-08-01"
+expect_ok "add without date uses today" add --key git.undated --kind failure --summary s --evidence e
+check "add without date: LEARN_TODAY" test "$(fmval "$PDIR/candidates/git.undated.md" first-seen)" = "2026-09-30"
+expect_die "add rejects bad date" "invalid date" add --key git.baddate --kind failure --summary s --evidence e --date 2026-02-30
+expect_die "add rejects non-date" "invalid date" add --key git.baddate --kind failure --summary s --evidence e --date yesterday
+
+# bump: older date lowers first-seen, newer raises last-seen, in-between changes neither
+expect_ok "bump --date older" bump git.dated --evidence "older" --date 2026-07-01
+check "bump older: first-seen min" test "$(fmval "$DD" first-seen)" = "2026-07-01" -a "$(fmval "$DD" last-seen)" = "2026-07-22"
+expect_ok "bump --date newer" bump git.dated --evidence "newer" --date 2026-08-15
+check "bump newer: last-seen max" test "$(fmval "$DD" first-seen)" = "2026-07-01" -a "$(fmval "$DD" last-seen)" = "2026-08-15"
+expect_ok "bump --date in between" bump git.dated --evidence "middle" --date 2026-07-10
+check "bump middle: range unchanged" test "$(fmval "$DD" first-seen)" = "2026-07-01" -a "$(fmval "$DD" last-seen)" = "2026-08-15"
+check "bump evidence lines use their own dates" grep -q '^- 2026-07-10 proj-a: middle$' "$DD"
+printf 'key: git.dated\nevidence: from draft\ndate: 2026-09-01\n' > "$STORE/.drafts/dd2.md"
+expect_ok "bump --from with date:" bump --from "$STORE/.drafts/dd2.md"
+check "bump date: last-seen max" test "$(fmval "$DD" last-seen)" = "2026-09-01"
+check "bump date: evidence dated" grep -q '^- 2026-09-01 proj-a: from draft$' "$DD"
+expect_ok "bump without date uses today" bump git.dated --evidence "no date"
+check "bump without date: last-seen today" test "$(fmval "$DD" last-seen)" = "2026-09-30"
+expect_die "bump rejects bad date" "invalid date" bump git.dated --evidence x --date 2026-13-01
+unset LEARN_TODAY
+rm -f "$PDIR/candidates/git.dated.md" "$PDIR/candidates/git.dated-flag.md" "$PDIR/candidates/git.undated.md" "$PDIR/candidates/git.draft-one.md"
+run index
+
 # --- doctor ---------------------------------------------------------------
 run index
 run doctor
@@ -484,6 +582,8 @@ cat > "$STUBBIN/opencode" <<'EOF'
   printf 'config=%s\n' "$OPENCODE_CONFIG_CONTENT"
 } > "$STUB_LOG"
 printf '\nstub touched\n' >> "$AGENT_LEARNINGS_HOME/work/candidates/git.commit-scope.md"
+mkdir -p "$AGENT_LEARNINGS_HOME/.drafts"
+echo "leftover" > "$AGENT_LEARNINGS_HOME/.drafts/draft.md"
 [ "${STUB_FAIL:-0}" = 1 ] && { echo "boom" >&2; exit 3; }
 echo "working…"
 echo "triaged 2 events → +1 candidates, ~0 bumped, 1 noise / 0 merged / 0 proposed"
@@ -500,6 +600,10 @@ SUBJECTS="$(git -C "$DSTORE" log --format=%s)"
 if [[ "$SUBJECTS" == *"learn: pre-dream snapshot"* ]]; then pass "dream made pre-dream snapshot commit"; else fail "pre-dream snapshot" "$SUBJECTS"; fi
 if [ "$(git -C "$DSTORE" log -1 --format=%s)" = "learn: dream — triaged 2 events → +1 candidates, ~0 bumped, 1 noise / 0 merged / 0 proposed" ]; then pass "dream commit message uses agent summary"; else fail "dream commit message" "$(git -C "$DSTORE" log -1 --format=%s)"; fi
 check "dream leaves store clean" test -z "$(git -C "$DSTORE" status --porcelain --untracked-files=all)"
+check "dream: .drafts/ not in git status" test -z "$(git -C "$DSTORE" status --porcelain --untracked-files=all | grep '\.drafts')"
+check "dream: leftover draft removed" test ! -e "$DSTORE/.drafts/draft.md"
+check "dream: .drafts/ not committed" test -z "$(git -C "$DSTORE" ls-files .drafts)"
+check "store exclude lists .drafts/" grep -qxF '/.drafts/' "$DSTORE/.git/info/exclude"
 check ".dream-last == HEAD" test "$(cat "$DSTORE/.dream-last")" = "$(git -C "$DSTORE" rev-parse HEAD)"
 check "stub ran in store root" grep -q "^cwd=$DSTORE$" "$STUB_LOG"
 check "stub got pinned AGENT_LEARNINGS_HOME" grep -q "^home=$DSTORE$" "$STUB_LOG"

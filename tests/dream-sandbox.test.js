@@ -17,6 +17,17 @@ const prompt = readFileSync(join(SKILL, "dream", "prompt.md"), "utf8");
 const shellRules = (perms) => perms.filter((p) => p.action === "shell");
 const idx = (perms, action, resource) => perms.findIndex((p) => p.action === action && p.resource === resource);
 
+// Glob -> RegExp: `*` matches any run of characters (including spaces, newlines), all else literal.
+const globToRegExp = (glob) =>
+  new RegExp("^" + glob.split("*").map((s) => s.replace(/[.+?^${}()|[\]\\]/g, "\\$&")).join("[\\s\\S]*") + "$");
+
+// Last matching rule wins; no match means denied.
+const shellDecision = (rules, command) => {
+  let effect = "deny";
+  for (const r of rules) if (globToRegExp(r.resource).test(command)) effect = r.effect;
+  return effect;
+};
+
 test("template: default agent and agent set", () => {
   assert.equal(template.default_agent, "learn-dream");
   assert.deepEqual(Object.keys(template.agents).sort(), ["learn-dream", "learn-dream-check"]);
@@ -102,6 +113,53 @@ test("prompt: forbids applying and mentions the required pieces", () => {
   assert.match(prompt, /__LEARN_BIN__ ack/);
   assert.match(prompt, /learn-dream-check/);
   assert.doesNotMatch(prompt, /__MEMORY_BIN__/);
+});
+
+test("prompt: draft protocol replaces free text in shell and learn grep", () => {
+  assert.match(prompt, /__STORE__\/\.drafts\/draft\.md/);
+  assert.match(prompt, /--from \.drafts\/draft\.md/);
+  assert.match(prompt, /NEVER put free text/);
+  assert.doesNotMatch(prompt, /__LEARN_BIN__ grep/);
+  assert.doesNotMatch(prompt, /--evidence "/);
+  assert.match(prompt, /grep tool on `__STORE__\/<p>\/candidates\/`/);
+});
+
+test("prompt: date field from the event ts, evidence without prefix", () => {
+  assert.match(prompt, /`date:` is `YYYY-MM-DD` taken from the event's `ts`/);
+  assert.match(prompt, /already prefixes the evidence line with `<date> <project>:`/);
+  assert.match(prompt, /`evidence:` must be only the text/);
+  assert.match(prompt, /`add`: key, kind, summary, evidence, project, behavior, owner, date/);
+  assert.match(prompt, /`bump`: key, evidence, project, date/);
+});
+
+test("sandbox simulation: --from drafts and plain commands allowed, free text and apply denied", () => {
+  const rendered = JSON.parse(
+    JSON.stringify(template)
+      .replaceAll("__LEARN_BIN__", "/opt/learn")
+      .replaceAll("__STORE__", "/store")
+      .replaceAll("__HOME__", "/home/u"),
+  );
+  const rules = shellRules(rendered.agents["learn-dream"].permissions);
+  const bin = "/opt/learn";
+  for (const pre of ["", "rtk "]) {
+    for (const cmd of [
+      `${bin} add --profile work --from .drafts/draft.md`,
+      `${bin} bump --profile work --from .drafts/draft.md`,
+      `${bin} reject --profile work --from .drafts/draft.md`,
+      `${bin} ack --profile work --until 2026-09-30T12:00:00Z`,
+      `${bin} inbox --profile work --limit 200`,
+    ]) {
+      assert.equal(shellDecision(rules, pre + cmd), "allow", `allowed: ${pre}${cmd}`);
+    }
+    for (const cmd of [
+      `${bin} add --profile work --key git.x --kind failure --summary s --evidence "a; b"`,
+      `${bin} add --profile work --key git.x --kind failure --summary s --evidence "did commit now"`,
+      `${bin} add --profile work --from .drafts/draft.md; ls`,
+      `${bin} apply --profile work git.x --owner skill:y --change-ref r`,
+    ]) {
+      assert.equal(shellDecision(rules, pre + cmd), "deny", `denied: ${pre}${cmd}`);
+    }
+  }
 });
 
 test("print-config substitutes every placeholder and stays valid JSON", () => {
