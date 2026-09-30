@@ -453,10 +453,14 @@ cmd_init() {
 # inbox / ack
 # ---------------------------------------------------------------------------
 
-# Filtered inbox events. Usage: inbox_stream <mode raw|compact> <since> <ack> <kind> <tier>
+# Filtered inbox events, globally sorted by ts (stable; line order inside a jsonl
+# file is not guaranteed because sessions append concurrently).
+# Usage: inbox_stream <mode raw|compact> <since> <ack> <kind> <tier> [limit]
 # Timestamps are ISO-8601 UTC strings, so string comparison orders them.
+# limit (optional, > 0): the oldest N events, extended to every event that shares
+# the Nth event's ts, so `ack --until <trailer ts>` never hides an unseen event.
 inbox_stream() {
-  local f
+  local f tab=$'\t'
   local -a files=()
   for f in "$PDIR"/inbox/*.jsonl; do
     [ -e "$f" ] || continue
@@ -497,7 +501,9 @@ inbox_stream() {
       if (ack != "" && ts <= ack) next
       if (wkind != "" && kind != wkind) next
       if (wtier != "" && tier != wtier) next
-      if (mode == "raw") { print; next }
+      # ts<TAB>payload: neither ts nor payload holds a literal tab (JSON escapes
+      # tabs; jget turns \t into a space), so the tab is a safe sort key separator.
+      if (mode == "raw") { print ts "\t" $0; next }
       project = jget($0, "project")
       if (kind == "failure") {
         text = jget($0, "tool") ": " jget($0, "head")
@@ -508,9 +514,20 @@ inbox_stream() {
       }
       label = kind
       if (tier != "") label = kind "/" tier
-      print ts "  " label "  " project "  " text
+      print ts "\t" ts "  " label "  " project "  " text
     }
-  ' "${files[@]}"
+  ' "${files[@]}" | LC_ALL=C sort -t "$tab" -s -k1,1 | IN_LIMIT="${6:-}" awk '
+    # No early `exit`: it would SIGPIPE the upstream sort and trip pipefail + set -e.
+    BEGIN { limit = ENVIRON["IN_LIMIT"] + 0; n = 0; done = 0; last = "" }
+    done { next }
+    {
+      i = index($0, "\t")
+      ts = substr($0, 1, i - 1)
+      if (limit > 0 && n >= limit && ts != last) { done = 1; next }
+      print substr($0, i + 1)
+      n++; last = ts
+    }
+  '
 }
 
 read_ack() {
@@ -536,13 +553,11 @@ cmd_inbox() {
   resolve_profile
   ack=""
   if [ "$all" -eq 0 ]; then ack="$(read_ack)"; fi
-  # --limit N: oldest N events (files are per-day, lines are appended in time order).
+  # --limit N: oldest N events, extended to ties (see inbox_stream).
   if [ "$json" -eq 1 ]; then
-    if [ -n "$limit" ]; then inbox_stream raw "$since" "$ack" "$kind" "$tier" | { head -n "$limit"; cat >/dev/null; }
-    else inbox_stream raw "$since" "$ack" "$kind" "$tier"; fi
+    inbox_stream raw "$since" "$ack" "$kind" "$tier" "$limit"
   else
-    out="$(inbox_stream compact "$since" "$ack" "$kind" "$tier")"
-    if [ -n "$limit" ] && [ -n "$out" ]; then out="$(printf '%s\n' "$out" | { head -n "$limit"; cat >/dev/null; })"; fi
+    out="$(inbox_stream compact "$since" "$ack" "$kind" "$tier" "$limit")"
     if [ -n "$out" ]; then
       printf '%s\n' "$out"
       maxts="$(printf '%s\n' "$out" | awk '{ print $1 }' | LC_ALL=C sort | tail -n 1)"
@@ -916,7 +931,7 @@ count_md() {
 cmd_status() {
   [ $# -eq 0 ] || die "usage: learn status"
   resolve_profile
-  local unacked ack dirty top
+  local unacked ack dirty top dpid
   ack="$(read_ack)"
   unacked="$(inbox_stream raw "" "$ack" "" "" | grep -c '' || true)"
   echo "store:      $STORE_HOME"
@@ -925,6 +940,7 @@ cmd_status() {
   echo "applied:    $(count_md "$PDIR/applied")"
   echo "rejected:   $(count_md "$PDIR/rejected")"
   echo "inbox:      $unacked unacked event(s)"
+  if dpid="$(dream_lock_pid)"; then echo "dream:      running (pid $dpid)"; fi
   top="$(git -C "$STORE_HOME" rev-parse --show-toplevel 2>/dev/null || true)"
   if [ -n "$top" ] && top="$(cd -P "$top" && pwd -P)" && [ "$top" = "$STORE_HOME" ]; then
     dirty="$(git -C "$STORE_HOME" status --porcelain --untracked-files=all | wc -l | tr -d ' ')"
@@ -1474,7 +1490,7 @@ dream_render() {   # dream_render <template> <store> <learn-bin> <home>
 ensure_store_excludes() {
   local p ex="$STORE_HOME/.git/info/exclude"
   mkdir -p "$STORE_HOME/.git/info"
-  for p in /.dream-last /.drafts/; do
+  for p in /.dream-last /.drafts/ /.dream.lock; do
     if ! grep -qxF "$p" "$ex" 2>/dev/null; then
       if [ -s "$ex" ] && [ -n "$(tail -c 1 "$ex")" ]; then printf '\n' >> "$ex"; fi
       printf '%s\n' "$p" >> "$ex"
@@ -1482,9 +1498,49 @@ ensure_store_excludes() {
   done
 }
 
+# Dream lock: $STORE_HOME/.dream.lock holds the PID of the running `learn dream`.
+# The plugin spawns `learn backup` after every turn; backup skips while the lock
+# is live so it cannot commit half-finished dream work or fight over index.lock.
+
+# Echo the PID and return 0 when the lock is held by a live process; else return 1.
+dream_lock_pid() {
+  local pid=""
+  IFS= read -r pid 2>/dev/null < "$STORE_HOME/.dream.lock" || true
+  is_uint "$pid" && [ "$pid" -gt 0 ] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  printf '%s\n' "$pid"
+}
+
+# Remove the lock, but only when it still holds our PID.
+dream_lock_release() {
+  local pid=""
+  IFS= read -r pid 2>/dev/null < "$STORE_HOME/.dream.lock" || true
+  if [ "$pid" = "$$" ]; then rm -f "$STORE_HOME/.dream.lock"; fi
+  return 0
+}
+
+# Take the lock atomically (noclobber); replace a stale or unreadable one; die
+# when a live dream holds it. Releases on every exit path.
+dream_lock_acquire() {
+  local lock="$STORE_HOME/.dream.lock" pid tries=0
+  while :; do
+    if ( set -o noclobber; printf '%s\n' "$$" > "$lock" ) 2>/dev/null; then break; fi
+    if pid="$(dream_lock_pid)"; then die "another learn dream is running (pid $pid)"; fi
+    tries=$((tries + 1))
+    [ "$tries" -le 5 ] || die "cannot take the dream lock $lock"
+    rm -f "$lock"   # stale or unreadable
+  done
+  trap dream_lock_release EXIT
+  trap 'exit 143' TERM
+  trap 'exit 130' INT
+  trap 'exit 129' HUP
+}
+
 # Stage everything and commit; returns 1 when there was nothing to commit.
 dream_commit() {   # dream_commit <message>
-  git -C "$STORE_HOME" add -A
+  # die, not return: callers test this function in `if`, where a failed add
+  # (e.g. index.lock) would otherwise read as "no changes".
+  git -C "$STORE_HOME" add -A || die "git add failed in $STORE_HOME"
   if git -C "$STORE_HOME" diff --cached --quiet 2>/dev/null \
      && git -C "$STORE_HOME" rev-parse -q --verify HEAD >/dev/null 2>&1; then
     return 1
@@ -1575,6 +1631,8 @@ cmd_dream() {
 
   # .dream-last and .drafts/ are local bookkeeping: keep them out of the store's commits.
   ensure_store_excludes
+  # One dream at a time; `learn backup` skips while the lock is live.
+  dream_lock_acquire
   # Commit pending changes first so the dream result is its own revertable commit.
   if [ -n "$(git -C "$STORE_HOME" status --porcelain --untracked-files=all)" ]; then
     dream_commit "learn: pre-dream snapshot" || true
@@ -1590,6 +1648,7 @@ cmd_dream() {
     if [ -n "$last" ] && git -C "$STORE_HOME" cat-file -e "$last^{commit}" 2>/dev/null \
        && [ -z "$(git -C "$STORE_HOME" diff --name-only "$last" "$pre" -- '*/candidates/*' '*/inbox/*' '*/applied/*' '*/rejected/*')" ]; then
       echo "dream: nothing changed in candidates/inbox/applied/rejected since the last run — skipping"
+      dream_lock_release
       return 0
     fi
   fi
@@ -1629,6 +1688,18 @@ cmd_dream() {
   done <<< "$(dream_profiles "")"
   PROFILE_OVERRIDE=""
 
+  # Inbox events the plugin appended during the run get their own commit, so the
+  # dream commit holds only the agent's changes, .ack and INDEX. The pathspec
+  # form leaves anything the agent staged elsewhere (git rm / git mv) alone.
+  if git -C "$STORE_HOME" rev-parse -q --verify HEAD >/dev/null 2>&1 \
+     && [ -n "$(git -C "$STORE_HOME" status --porcelain --untracked-files=all -- '*/inbox/*.jsonl')" ]; then
+    git -C "$STORE_HOME" add -A -- '*/inbox/*.jsonl' || die "git add failed in $STORE_HOME"
+    if ! git -C "$STORE_HOME" diff --cached --quiet -- '*/inbox/*.jsonl'; then
+      git -C "$STORE_HOME" commit -q -m "learn: inbox events recorded during dream" -- '*/inbox/*.jsonl' \
+        || die "commit failed in $STORE_HOME — is git user.name / user.email configured?"
+    fi
+  fi
+
   local committed=0
   if dream_commit "learn: dream — $summary"; then committed=1; fi
   if git -C "$STORE_HOME" rev-parse -q --verify HEAD >/dev/null 2>&1; then
@@ -1666,10 +1737,15 @@ backup_counts() {
 }
 
 cmd_backup() {
-  local push=0 profile="" target counts add bump applied rej msg subject
+  local push=0 profile="" target counts add bump applied rej msg subject dpid
   case "$#" in 0) ;; 1) [ "$1" = "--push" ] || die "usage: learn backup [--push]"; push=1 ;; *) die "usage: learn backup [--push]" ;; esac
   [ -d "$LEARN_HOME/.git" ] || die "no store at $LEARN_HOME (ask the user to run: learn init <profile>)"
   STORE_HOME="$(cd -P "$LEARN_HOME" && pwd -P)"
+  # A running dream owns the store: no git operations, no push.
+  if dpid="$(dream_lock_pid)"; then
+    echo "dream in progress (pid $dpid) — backup skipped"
+    return 0
+  fi
   if [ -L .learnings ]; then
     target="$(readlink .learnings)"
     profile="$(basename "$target")"

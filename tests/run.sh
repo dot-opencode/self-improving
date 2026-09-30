@@ -584,6 +584,20 @@ cat > "$STUBBIN/opencode" <<'EOF'
 printf '\nstub touched\n' >> "$AGENT_LEARNINGS_HOME/work/candidates/git.commit-scope.md"
 mkdir -p "$AGENT_LEARNINGS_HOME/.drafts"
 echo "leftover" > "$AGENT_LEARNINGS_HOME/.drafts/draft.md"
+# STUB_INBOX=1: the plugin appends an inbox event while the dream runs.
+if [ "${STUB_INBOX:-0}" = 1 ]; then
+  mkdir -p "$AGENT_LEARNINGS_HOME/work/inbox"
+  printf '{"ts":"2026-09-30T23:00:00Z","kind":"failure","tool":"bash","head":"during-dream","project":"proj-a","session":"s9"}\n' \
+    >> "$AGENT_LEARNINGS_HOME/work/inbox/$(date +%Y-%m-%d).jsonl"
+fi
+# STUB_BACKUP=1: the plugin's end-of-turn `learn backup` fires mid-dream.
+if [ "${STUB_BACKUP:-0}" = 1 ]; then
+  {
+    echo "head_before=$(git -C "$AGENT_LEARNINGS_HOME" rev-parse HEAD)"
+    (cd "$STUB_BACKUP_CWD" && "$LEARN_FOR_STUB" backup 2>&1)
+    echo "head_after=$(git -C "$AGENT_LEARNINGS_HOME" rev-parse HEAD)"
+  } > "$STUB_BACKUP_LOG" 2>&1
+fi
 [ "${STUB_FAIL:-0}" = 1 ] && { echo "boom" >&2; exit 3; }
 echo "working…"
 echo "triaged 2 events → +1 candidates, ~0 bumped, 1 noise / 0 merged / 0 proposed"
@@ -640,6 +654,113 @@ cd "$TMP/proj" || exit 1
 rm -rf "$DSTORE/.drafts"
 OUT="$(STUB_FAIL=1 PATH="$STUBBIN:$PATH" AGENT_LEARNINGS_HOME="$DSTORE" "$LEARN" dream 2>&1)"
 check "dream pre-creates .drafts/ before the agent runs" test -d "$DSTORE/.drafts"
+check "failed dream (STUB_FAIL) leaves no .dream.lock" test ! -e "$DSTORE/.dream.lock"
+
+# --- dream lock -------------------------------------------------------------
+export STUB_LOG="$TMP/stub.log"
+export LEARN_FOR_STUB="$LEARN"
+export AGENT_LEARNINGS_HOME="$DSTORE"
+LOCK="$DSTORE/.dream.lock"
+check "store exclude lists .dream.lock" grep -qxF '/.dream.lock' "$DSTORE/.git/info/exclude"
+# the store is dirty here (failed dreams leave changes) -> a backup would commit
+sleep 30 & LIVE_PID=$!
+echo "$LIVE_PID" > "$LOCK"
+HEAD_LOCKED="$(git -C "$DSTORE" rev-parse HEAD)"
+check "store is dirty before the live-lock checks" test -n "$(git -C "$DSTORE" status --porcelain --untracked-files=all)"
+run backup
+expect_contains "backup with live dream lock is skipped" "backup skipped"
+expect_contains "backup skip names the dream pid" "pid $LIVE_PID"
+if [ "$RC" -eq 0 ]; then pass "backup skip exits 0"; else fail "backup skip exits 0" "exit $RC: $OUT"; fi
+check "backup with live lock makes no commit" test "$(git -C "$DSTORE" rev-parse HEAD)" = "$HEAD_LOCKED"
+check "backup with live lock stages nothing" test -z "$(git -C "$DSTORE" diff --cached --name-only)"
+run status --profile work
+expect_contains "status shows running dream" "running (pid $LIVE_PID)"
+rm -f "$STUB_LOG"
+OUT="$(PATH="$STUBBIN:$PATH" "$LEARN" dream 2>&1)"; RC=$?
+if [ "$RC" -ne 0 ] && [[ "$OUT" == *"another learn dream is running (pid $LIVE_PID)"* ]]; then pass "dream dies while another dream holds the lock"; else fail "dream with live lock" "exit $RC: $OUT"; fi
+check "refused dream did not run the agent" test ! -e "$STUB_LOG"
+check "refused dream leaves the other lock alone" test "$(cat "$LOCK")" = "$LIVE_PID"
+kill "$LIVE_PID" 2>/dev/null; wait "$LIVE_PID" 2>/dev/null
+
+# stale lock (dead pid): backup proceeds, dream replaces it and cleans up
+true & DEAD_PID=$!; wait "$DEAD_PID" 2>/dev/null
+echo "$DEAD_PID" > "$LOCK"
+run status --profile work
+expect_not_contains "status ignores a stale lock" "running (pid"
+run backup
+expect_contains "backup with stale lock commits" "backed up:"
+check "backup with stale lock moved HEAD" test "$(git -C "$DSTORE" rev-parse HEAD)" != "$HEAD_LOCKED"
+echo "$DEAD_PID" > "$LOCK"
+OUT="$(PATH="$STUBBIN:$PATH" "$LEARN" dream 2>&1)"; RC=$?
+if [ "$RC" -eq 0 ] && [ -e "$STUB_LOG" ]; then pass "dream replaces a stale lock"; else fail "dream with stale lock" "exit $RC: $OUT"; fi
+check "no .dream.lock after successful dream" test ! -e "$LOCK"
+echo "not a pid" > "$LOCK"
+OUT="$(PATH="$STUBBIN:$PATH" "$LEARN" dream 2>&1)"; RC=$?
+if [ "$RC" -eq 0 ]; then pass "dream replaces an unreadable lock"; else fail "dream with garbage lock" "exit $RC: $OUT"; fi
+check "no .dream.lock after dream over garbage lock" test ! -e "$LOCK"
+OUT="$(STUB_FAIL=1 PATH="$STUBBIN:$PATH" "$LEARN" dream 2>&1)"; RC=$?
+if [ "$RC" -ne 0 ]; then pass "STUB_FAIL dream still fails"; else fail "STUB_FAIL dream exits non-zero" "$OUT"; fi
+check "no .dream.lock after STUB_FAIL dream" test ! -e "$LOCK"
+# --if-changed skip path releases the lock too
+"$LEARN" backup >/dev/null 2>&1
+PATH="$STUBBIN:$PATH" "$LEARN" dream >/dev/null 2>&1
+OUT="$(PATH="$STUBBIN:$PATH" "$LEARN" dream --if-changed 2>&1)"; RC=$?
+if [[ "$OUT" == *"skipping"* ]]; then pass "dream --if-changed skips (lock test)"; else fail "dream --if-changed skip (lock test)" "exit $RC: $OUT"; fi
+check "no .dream.lock after --if-changed skip" test ! -e "$LOCK"
+# the lock is local bookkeeping: never tracked, never committed
+check ".dream.lock not in git ls-files" test -z "$(git -C "$DSTORE" ls-files | grep 'dream.lock')"
+check ".dream.lock in no commit" test -z "$(git -C "$DSTORE" log --all --name-only --format= | grep 'dream.lock')"
+check "store clean after lock scenarios" test -z "$(git -C "$DSTORE" status --porcelain --untracked-files=all)"
+
+# inbox events recorded during the dream get their own commit before the dream commit
+OUT="$(STUB_INBOX=1 PATH="$STUBBIN:$PATH" "$LEARN" dream 2>&1)"; RC=$?
+if [ "$RC" -eq 0 ]; then pass "dream with STUB_INBOX exits 0"; else fail "dream with STUB_INBOX" "exit $RC: $OUT"; fi
+SUBJ2="$(git -C "$DSTORE" log --format=%s -2)"
+EXPECT_SUBJ2="$(printf '%s\n%s' "learn: dream — triaged 2 events → +1 candidates, ~0 bumped, 1 noise / 0 merged / 0 proposed" "learn: inbox events recorded during dream")"
+if [ "$SUBJ2" = "$EXPECT_SUBJ2" ]; then pass "dream commit follows a separate inbox-events commit"; else fail "inbox-events commit order" "$SUBJ2"; fi
+check "inbox-events commit holds the jsonl" test -n "$(git -C "$DSTORE" show --name-only --format= HEAD~1 | grep 'inbox/.*\.jsonl')"
+check "dream commit holds no inbox jsonl" test -z "$(git -C "$DSTORE" show --name-only --format= HEAD | grep 'inbox/.*\.jsonl')"
+check "dream commit holds the agent's changes" test -n "$(git -C "$DSTORE" show --name-only --format= HEAD | grep 'candidates/')"
+check "store clean after STUB_INBOX dream" test -z "$(git -C "$DSTORE" status --porcelain --untracked-files=all)"
+check "no .dream.lock after STUB_INBOX dream" test ! -e "$LOCK"
+
+# a backup fired mid-dream (the plugin's end-of-turn hook) is skipped
+mkdir -p "$TMP/bproj"
+ln -sfn "$DPDIR" "$TMP/bproj/.learnings"
+export STUB_BACKUP_CWD="$TMP/bproj" STUB_BACKUP_LOG="$TMP/stub-backup.log"
+rm -f "$STUB_BACKUP_LOG"
+OUT="$(STUB_BACKUP=1 PATH="$STUBBIN:$PATH" "$LEARN" dream 2>&1)"; RC=$?
+if [ "$RC" -eq 0 ]; then pass "dream with mid-dream backup exits 0"; else fail "dream with STUB_BACKUP" "exit $RC: $OUT"; fi
+check "mid-dream backup was skipped" grep -q 'backup skipped' "$STUB_BACKUP_LOG"
+check "mid-dream backup made no commit" test "$(grep '^head_before=' "$STUB_BACKUP_LOG" | cut -d= -f2)" = "$(grep '^head_after=' "$STUB_BACKUP_LOG" | cut -d= -f2)"
+check "dream commit is HEAD after mid-dream backup" test "$(git -C "$DSTORE" log -1 --format=%s | cut -c1-13)" = "learn: dream "
+check "dream commit holds the agent's changes (mid-dream backup)" test -n "$(git -C "$DSTORE" show --name-only --format= HEAD | grep 'candidates/')"
+check "no .dream.lock after mid-dream backup dream" test ! -e "$LOCK"
+unset STUB_LOG STUB_BACKUP_CWD STUB_BACKUP_LOG LEARN_FOR_STUB
+
+# --- inbox --limit: ties and line order ---------------------------------------
+TIES="$TMP/ties"
+mkdir -p "$TIES/work/inbox" "$TIES/work/candidates" "$TIES/work/applied" "$TIES/work/rejected"
+git -C "$TIES" init -q
+tev() { printf '{"ts":"2026-09-30T%s","kind":"failure","tool":"bash","head":"%s","project":"proj-a"}\n' "$1" "$2"; }
+{ tev 10:00:01Z a1; tev 10:00:02Z b1; tev 10:00:02Z b2; tev 10:00:03Z c1; tev 10:00:00Z late; } > "$TIES/work/inbox/2026-09-30.jsonl"
+tl() { AGENT_LEARNINGS_HOME="$TIES" "$LEARN" "$@"; }
+OUT="$(tl inbox --profile work --limit 2 2>&1)"
+if [ "$(printf '%s\n' "$OUT" | grep -c '^2026-')" = "2" ]; then pass "inbox --limit 2: two events"; else fail "inbox --limit 2" "$OUT"; fi
+if [ "$(printf '%s\n' "$OUT" | grep '^2026-' | awk '{print $1}' | paste -sd' ' -)" = "2026-09-30T10:00:00Z 2026-09-30T10:00:01Z" ]; then pass "inbox --limit 2: sorted by ts, late-appended line first"; else fail "inbox --limit 2 order" "$OUT"; fi
+expect_contains "inbox --limit 2: trailer is 10:00:01" "ack: learn ack --until 2026-09-30T10:00:01Z"
+OUT="$(tl inbox --profile work --limit 3 2>&1)"
+if [ "$(printf '%s\n' "$OUT" | grep -c '^2026-')" = "4" ]; then pass "inbox --limit 3 extends the tie (4 events)"; else fail "inbox --limit 3 tie" "$OUT"; fi
+expect_contains "inbox --limit 3: trailer is 10:00:02" "ack: learn ack --until 2026-09-30T10:00:02Z"
+expect_not_contains "inbox --limit 3: next ts not shown" "10:00:03Z  "
+OUT="$(tl inbox --profile work --json --limit 3 2>&1)"
+if [ "$(printf '%s\n' "$OUT" | grep -c '^{')" = "4" ]; then pass "inbox --json --limit 3 extends the tie (4 lines)"; else fail "inbox --json --limit 3 tie" "$OUT"; fi
+if [[ "$(printf '%s\n' "$OUT" | head -n 1)" == *'"ts":"2026-09-30T10:00:00Z"'* ]]; then pass "inbox --json --limit 3: first line is 10:00:00"; else fail "inbox --json order" "$OUT"; fi
+OUT="$(tl inbox --profile work --json 2>&1)"
+if [ "$(printf '%s\n' "$OUT" | grep -c '^{')" = "5" ]; then pass "inbox --json without limit keeps all 5"; else fail "inbox --json all" "$OUT"; fi
+tl ack --profile work --until 2026-09-30T10:00:02Z >/dev/null 2>&1
+OUT="$(tl inbox --profile work 2>&1)"
+if [ "$(printf '%s\n' "$OUT" | grep -c '^2026-')" = "1" ] && [[ "$OUT" == *"2026-09-30T10:00:03Z"* ]]; then pass "after ack --until 10:00:02 only 10:00:03 remains"; else fail "ack after tie batch" "$OUT"; fi
 
 # spaced JSON lines (e.g. from python json.dumps) parse like compact ones
 SSTORE="$TMP/sstore"
