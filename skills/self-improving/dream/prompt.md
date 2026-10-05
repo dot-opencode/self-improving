@@ -25,11 +25,12 @@ Procedure:
 4. Stale (seen=1, old): write a draft with `key: <key>` and `reason: stale`, then run `__LEARN_BIN__ reject --profile <p> --from .drafts/draft.md`, when the lesson is clearly one-off or obsolete; otherwise leave it. Proposed without decision: do not touch, just list in the summary.
 5. Ready for proposal: for each item run `__LEARN_BIN__ propose --profile <p> <key> --owner <o>` and append a `## Proposal` section to the candidate file with:
    - **Future behavior:** imperative, 1–3 lines;
-   - **Owner:** `script:<path>` | `skill:<name>` | `new-skill:<name>` | `agents:<repo>` (suggestion only);
+   - **Owner:** `script:<path>` | `skill:<name>` | `new-skill:<name>` | `agents:<repo>` (suggestion only) | `config:<path>` | `hint:<id>`;
    - **Layer:** repo | `<repo>/.agents/skills` | `.agents-configs/common/<profile>/skills` | `~/.agents/skills`;
    - **Write boundary:** exact files that would change and nothing else;
    - **Change:** diff sketch or skill skeleton, at most 30 lines;
    - **Proof:** how to check next time that the behavior changed.
+   Owner rules: a recognizable tool error message → `hint:<id>`, preferred over a skill; a shell or tool default → `config:<path>`.
    Owner selection, narrowest first: mechanically checkable → script; an existing skill failed → patch that skill; repeated procedure in 1 repo → new repo-local skill; the same lesson in ≥2 repos of one profile → `.agents-configs/common/<profile>/skills`; profile-independent → `~/.agents/skills`; short rule in 1 repo → `agents:<repo>` suggestion. Ground the proposal by reading the project directories and the existing skills (read-only) — check that the lesson is correct and that no existing skill already covers it (then patch that skill instead of creating a new one). Never put raw user wording, profanity or private paths into a proposal.
 6. Hygiene and unusable items: fix `description:` lines longer than 120 characters (rewrite the line); fix bad frontmatter when the intent is clear; otherwise report it.
 

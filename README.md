@@ -50,7 +50,7 @@ never runs it.
 ~/.agent-learnings/                 # git repo; override with AGENT_LEARNINGS_HOME
   markers.json                      # personal markers (local)
   <profile>/
-    inbox/YYYY-MM-DD.jsonl          # raw plugin events (read via `learn inbox`)
+    inbox/YYYY-MM-DD.jsonl          # raw plugin events (read via `learn inbox`); optional `ats` = arrival time (backfills), the ack/order key when present
     candidates/<pattern-key>.md
     applied/<pattern-key>.md
     rejected/<pattern-key>.md
@@ -84,6 +84,8 @@ Two files with the same schema; the plugin merges them (personal after default):
 
 - `skills/self-improving/opencode/markers.default.json` — shared RU/EN markers.
 - `~/.agent-learnings/markers.json` — personal, created by `learn init`, never in this repo.
+
+Tool-error hints (extra text appended to a recognizable tool error the model sees): `skills/self-improving/opencode/hints.default.json`, plus optional personal `~/.agent-learnings/hints.json` (same `id` overrides the default).
 
 Tiers: `correction.{strong,medium,weak}` and `confirmation`. Manage with
 `learn markers list | add --tier <t> "<re>" | test "<text>"`. When triage finds a

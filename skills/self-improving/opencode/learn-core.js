@@ -99,6 +99,114 @@ export function loadMarkers(defaultPath, personalPath) {
   return compileMarkers(readJson(defaultPath), readJson(personalPath))
 }
 
+// ---- Tool-error hints -------------------------------------------------------
+// Shape: { version: 1, hints: [{ id, tools: [...], match: "<regex>", text }] }.
+
+function compileHints(...sources) {
+  const byId = new Map()
+  for (const source of sources) {
+    if (!source || typeof source !== "object" || !Array.isArray(source.hints)) continue
+    for (const hint of source.hints) {
+      if (!hint || typeof hint !== "object") continue
+      if (typeof hint.id !== "string" || !hint.id || typeof hint.text !== "string" || !hint.text) continue
+      if (typeof hint.match !== "string" || !hint.match || !Array.isArray(hint.tools)) continue
+      let re
+      try {
+        re = new RegExp(unicodeize(hint.match), "iu")
+      } catch {
+        continue
+      }
+      const tools = new Set(hint.tools.filter((t) => typeof t === "string").map((t) => t.toLowerCase()))
+      byId.delete(hint.id) // same id replaces the earlier one (and moves to the end)
+      byId.set(hint.id, { id: hint.id, tools, re, text: hint.text })
+    }
+  }
+  return [...byId.values()]
+}
+
+// Default first, personal merged after; same `id` in personal replaces the default.
+export function loadHints(defaultPath, personalPath) {
+  return compileHints(readJson(defaultPath), readJson(personalPath))
+}
+
+// Returns an array of error strings; empty means the hints file is valid.
+export function validateHints(json) {
+  const errors = []
+  if (!json || typeof json !== "object" || Array.isArray(json)) return ["hints must be a JSON object"]
+  if (json.version !== 1) errors.push(`unsupported version: ${JSON.stringify(json.version)} (expected 1)`)
+  if (!Array.isArray(json.hints)) { errors.push("'hints' must be an array"); return errors }
+  const seen = new Set()
+  json.hints.forEach((hint, i) => {
+    const at = `hints[${i}]`
+    if (!hint || typeof hint !== "object" || Array.isArray(hint)) { errors.push(`'${at}' must be an object`); return }
+    if (typeof hint.id !== "string" || !hint.id) errors.push(`'${at}.id' must be a non-empty string`)
+    else if (seen.has(hint.id)) errors.push(`'${at}.id' duplicate id ${JSON.stringify(hint.id)}`)
+    else seen.add(hint.id)
+    if (!Array.isArray(hint.tools) || hint.tools.length === 0 || hint.tools.some((t) => typeof t !== "string" || !t)) {
+      errors.push(`'${at}.tools' must be a non-empty array of strings`)
+    }
+    if (typeof hint.text !== "string" || !hint.text) errors.push(`'${at}.text' must be a non-empty string`)
+    if (typeof hint.match !== "string" || !hint.match) errors.push(`'${at}.match' must be a non-empty string`)
+    else {
+      try { new RegExp(unicodeize(hint.match), "iu") } catch (error) { errors.push(`'${at}.match' invalid regex ${JSON.stringify(hint.match)}: ${error.message}`) }
+    }
+  })
+  return errors
+}
+
+function failureText(ev) {
+  if (ev.status === "error") {
+    const e = ev.error
+    return String(e?.message ?? (typeof e === "string" ? e : ""))
+  }
+  return resultText(ev.result)
+}
+
+export function matchHint(ev, hints) {
+  try {
+    if (!Array.isArray(hints) || hints.length === 0) return undefined
+    if (!detectToolFailure(ev)) return undefined
+    const name = String(ev.tool ?? "").toLowerCase()
+    const text = failureText(ev)
+    for (const hint of hints) {
+      if (hint.tools?.has(name) && hint.re.test(text)) return { id: hint.id, text: hint.text }
+    }
+  } catch {
+    // Hints are best-effort.
+  }
+  return undefined
+}
+
+// Mutates ev so the model sees the hint. Synchronous; never throws.
+export function applyHint(ev, hint) {
+  try {
+    if (!ev || !hint || typeof hint.text !== "string" || !hint.text) return false
+    if (ev.status === "error") {
+      if (typeof ev.error === "string") {
+        if (ev.error.includes(hint.text)) return false
+        ev.error = `${ev.error}\n${hint.text}`
+        return true
+      }
+      if (ev.error && typeof ev.error === "object" && typeof ev.error.message === "string") {
+        if (ev.error.message.includes(hint.text)) return false
+        ev.error.message = `${ev.error.message}\n${hint.text}`
+        return true
+      }
+      return false
+    }
+    if (ev.status === "completed") {
+      const content = ev.result?.content
+      if (!Array.isArray(content)) return false
+      if (content.some((part) => typeof part?.text === "string" && part.text.includes(hint.text))) return false
+      content.push({ type: "text", text: hint.text })
+      return true
+    }
+  } catch {
+    // never throw
+  }
+  return false
+}
+
 // `opencode run "..."` and pasted quotes wrap the whole message; anchors must see the real start.
 export function stripWrappingQuotes(text) {
   const value = String(text ?? "").trim()
@@ -213,6 +321,12 @@ function numericExit(result) {
   return undefined
 }
 
+function resultText(result) {
+  return typeof result === "string"
+    ? result
+    : [flatten(result?.content), flatten(result?.output), flatten(result?.metadata?.output)].filter(Boolean).join("\n")
+}
+
 export function detectToolFailure(ev) {
   if (!ev || typeof ev !== "object") return undefined
   const tool = ev.tool
@@ -226,9 +340,7 @@ export function detectToolFailure(ev) {
   if (!isBash && !EDIT_TOOLS.has(name)) return undefined
 
   const result = ev.result
-  const text = typeof result === "string"
-    ? result
-    : [flatten(result?.content), flatten(result?.output), flatten(result?.metadata?.output)].filter(Boolean).join("\n")
+  const text = resultText(result)
 
   if (isBash) {
     const exit = numericExit(result)

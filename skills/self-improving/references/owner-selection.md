@@ -6,6 +6,8 @@ spans more repos or profiles.
 | Situation | Owner | Layer |
 |---|---|---|
 | Mechanically checkable | script / hook / lint | repo |
+| A recognizable tool error message | plugin hint | `hint:<id>`, in `opencode/hints.default.json` (generic) or `~/.agent-learnings/hints.json` (user-specific) |
+| A shell or tool default setting | config file | `config:<path>`, for example `~/.zshenv` |
 | An existing skill failed | patch that skill | wherever it lives |
 | Repeated procedure, 1 repo | new skill | `<repo>/.agents/skills` |
 | Repeats in ≥2 repos of a profile | new skill | `.agents-configs/common/<profile>/skills` |
@@ -64,3 +66,18 @@ procedure. Owner `agents:<repo>` — **suggest** a one-line addition to that rep
 `AGENTS.md`, show the diff, and let the user decide. If the same rule shows up across
 repos, switch to a skill in `common/<profile>` or `~/.agents/skills`; never write a
 profile-level `AGENTS.md`.
+
+### 6. Config file
+
+Candidate `shell.zsh-glob-nomatch`, `seen: 3`, several projects: unquoted globs such
+as `ls *.log` fail in zsh with `no matches found`. A shell default, not a skill
+matter → owner `config:~/.zshenv` (add `setopt no_nomatch`). Proof: an unquoted glob
+with no match no longer aborts the command.
+
+### 7. Plugin hint
+
+Candidate `edit.stale-patch`, `seen: 3`: patches fail with `Failed to find expected
+lines` because the agent patches from memory. A recognizable tool error message →
+owner `hint:patch-reread` in `opencode/hints.default.json` (generic; use
+`~/.agent-learnings/hints.json` for user-specific). The hint is appended to the error
+the model sees. Preferred over a skill: it fires exactly when the error happens.

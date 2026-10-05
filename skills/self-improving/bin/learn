@@ -44,6 +44,8 @@ commands:
   bump [<key>] --from <file> [flags]        same, from a draft (key evidence project date)
   propose <key> [--owner <o>]               status: proposed
   apply <key> --owner <o> --change-ref <r>  move to applied/ (only after user approval)
+                                            owner: script:<path> | skill:<name> | new-skill:<name>
+                                            | agents:<repo> | config:<path> | hint:<id>
   reject <key> --reason "..."               move to rejected/
   reject [<key>] --from <file> [--reason r] same, from a draft (key reason)
   index                                     rebuild INDEX.md from candidates/
@@ -92,7 +94,7 @@ OPENCODE_DIR="$SKILL_DIR/opencode"
 
 valid_slug() { [[ "$1" =~ ^[a-z0-9][a-z0-9-]*$ ]]; }
 valid_key() { [[ "$1" =~ ^[a-z]+\.[a-z0-9-]+$ ]]; }
-valid_owner() { [[ "$1" =~ ^(script|skill|new-skill|agents):.+ ]]; }
+valid_owner() { [[ "$1" =~ ^(script|skill|new-skill|agents|config|hint):.+ ]]; }
 
 require_slug() {
   valid_slug "$2" || die "invalid $1 '$2': use lowercase letters, digits, and hyphens"
@@ -463,12 +465,16 @@ cmd_init() {
 # inbox / ack
 # ---------------------------------------------------------------------------
 
-# Filtered inbox events, globally sorted by ts (stable; line order inside a jsonl
-# file is not guaranteed because sessions append concurrently).
-# Usage: inbox_stream <mode raw|compact> <since> <ack> <kind> <tier> [limit]
-# Timestamps are ISO-8601 UTC strings, so string comparison orders them.
+# Filtered inbox events, globally sorted by arrival key (stable; line order inside
+# a jsonl file is not guaranteed because sessions append concurrently).
+# Usage: inbox_stream <mode raw|compact> <since> <ack> <kind> <tier> [limit] [keyed]
+# The key is `ats` (time the event entered the inbox; set by backfills) when
+# present, else `ts`. Sorting, --limit, and ack filtering use the key; --since
+# filters on `ts` (event time). Timestamps are ISO-8601 UTC strings, so string
+# comparison orders them.
 # limit (optional, > 0): the oldest N events, extended to every event that shares
-# the Nth event's ts, so `ack --until <trailer ts>` never hides an unseen event.
+# the Nth event's key, so `ack --until <trailer key>` never hides an unseen event.
+# keyed (optional, 1): keep the leading `key<TAB>` on every output line.
 inbox_stream() {
   local f tab=$'\t'
   local -a files=()
@@ -507,13 +513,14 @@ inbox_stream() {
     /^[[:space:]]*$/ { next }
     {
       ts = jget($0, "ts"); kind = jget($0, "kind"); tier = jget($0, "tier")
+      key = jget($0, "ats"); if (key == "") key = ts
       if (since != "" && ts < since) next
-      if (ack != "" && ts <= ack) next
+      if (ack != "" && key <= ack) next
       if (wkind != "" && kind != wkind) next
       if (wtier != "" && tier != wtier) next
-      # ts<TAB>payload: neither ts nor payload holds a literal tab (JSON escapes
+      # key<TAB>payload: neither key nor payload holds a literal tab (JSON escapes
       # tabs; jget turns \t into a space), so the tab is a safe sort key separator.
-      if (mode == "raw") { print ts "\t" $0; next }
+      if (mode == "raw") { print key "\t" $0; next }
       project = jget($0, "project")
       if (kind == "failure") {
         text = jget($0, "tool") ": " jget($0, "head")
@@ -524,18 +531,18 @@ inbox_stream() {
       }
       label = kind
       if (tier != "") label = kind "/" tier
-      print ts "\t" ts "  " label "  " project "  " text
+      print key "\t" ts "  " label "  " project "  " text
     }
-  ' "${files[@]}" | LC_ALL=C sort -t "$tab" -s -k1,1 | IN_LIMIT="${6:-}" awk '
+  ' "${files[@]}" | LC_ALL=C sort -t "$tab" -s -k1,1 | IN_LIMIT="${6:-}" IN_KEYED="${7:-}" awk '
     # No early `exit`: it would SIGPIPE the upstream sort and trip pipefail + set -e.
-    BEGIN { limit = ENVIRON["IN_LIMIT"] + 0; n = 0; done = 0; last = "" }
+    BEGIN { limit = ENVIRON["IN_LIMIT"] + 0; keyed = (ENVIRON["IN_KEYED"] == "1"); n = 0; done = 0; last = "" }
     done { next }
     {
       i = index($0, "\t")
-      ts = substr($0, 1, i - 1)
-      if (limit > 0 && n >= limit && ts != last) { done = 1; next }
-      print substr($0, i + 1)
-      n++; last = ts
+      key = substr($0, 1, i - 1)
+      if (limit > 0 && n >= limit && key != last) { done = 1; next }
+      if (keyed) print $0; else print substr($0, i + 1)
+      n++; last = key
     }
   '
 }
@@ -567,10 +574,12 @@ cmd_inbox() {
   if [ "$json" -eq 1 ]; then
     inbox_stream raw "$since" "$ack" "$kind" "$tier" "$limit"
   else
-    out="$(inbox_stream compact "$since" "$ack" "$kind" "$tier" "$limit")"
+    out="$(inbox_stream compact "$since" "$ack" "$kind" "$tier" "$limit" 1)"
     if [ -n "$out" ]; then
-      printf '%s\n' "$out"
-      maxts="$(printf '%s\n' "$out" | awk '{ print $1 }' | LC_ALL=C sort | tail -n 1)"
+      # Lines are `key<TAB>display`: the trailer comes from the key (ats or ts),
+      # the display keeps ts first.
+      printf '%s\n' "$out" | cut -f2-
+      maxts="$(printf '%s\n' "$out" | cut -f1 | LC_ALL=C sort | tail -n 1)"
       echo "ack: learn ack --until $maxts" >&2
     else
       echo "(no events)"
@@ -822,7 +831,7 @@ cmd_apply() {
   resolve_profile
   valid_key "$key" || die "invalid key '$key'"
   owner="$(oneline "$owner")"
-  valid_owner "$owner" || die "invalid owner '$owner': use script:<path> | skill:<name> | new-skill:<name> | agents:<repo>"
+  valid_owner "$owner" || die "invalid owner '$owner': use script:<path> | skill:<name> | new-skill:<name> | agents:<repo> | config:<path> | hint:<id>"
   ref="$(oneline "$ref")"
   local existing
   existing="$(find_key "$key")"
@@ -915,6 +924,7 @@ cmd_prune() {
     for f in "$PDIR"/inbox/*.jsonl; do
       [ -e "$f" ] || continue
       fdate="$(basename "$f" .jsonl)"
+      fdate="${fdate%-backfill}"   # backfills are named by arrival date: <date>-backfill.jsonl
       valid_calendar_date "$fdate" || continue
       if [ "$(days_from_civil "$fdate")" -lt $((ack_days - days)) ]; then
         rm -f "$f"
@@ -996,7 +1006,7 @@ doctor_dir_checks() {   # doctor_dir_checks <dirname>
           [ -n "$(fm_get "$f" "$v")" ] || dprob "APPLIED MISSING $v: $d/$base"
         done
         v="$(fm_get "$f" owner)"
-        if [ -n "$v" ] && ! valid_owner "$v"; then dprob "BAD OWNER ('$v'; use script:|skill:|new-skill:|agents:): $d/$base"; fi ;;
+        if [ -n "$v" ] && ! valid_owner "$v"; then dprob "BAD OWNER ('$v'; use script:|skill:|new-skill:|agents:|config:|hint:): $d/$base"; fi ;;
       rejected)
         [ "$status" = "rejected" ] || dprob "BAD STATUS ('$status' in rejected/): $d/$base"
         [ -n "$(fm_get "$f" reason)" ] || dprob "REJECTED MISSING reason: $d/$base" ;;
@@ -1040,6 +1050,7 @@ cmd_doctor() {
     is_in_store "$PDIR" || dprob "UNSAFE PROFILE DIR: $PDIR (outside $STORE_HOME)"
     [ "$DOC_PROBLEMS" -gt 0 ] || doctor_profile_checks
     doctor_markers_check
+    doctor_hints_check
     if [ "$DOC_PROBLEMS" -gt 0 ]; then die "problems found ($DOC_PROBLEMS)"; fi
     echo "OK"
     return 0
@@ -1071,6 +1082,7 @@ cmd_doctor() {
     fi
   fi
   doctor_markers_check
+  doctor_hints_check
   if [ "$DOC_PROBLEMS" -gt 0 ]; then die "problems found ($DOC_PROBLEMS)"; fi
   echo "OK"
 }
@@ -1083,6 +1095,15 @@ doctor_markers_check() {
     fi
   else
     echo "warning: $STORE_HOME/markers.json missing (run 'learn init <profile>')"
+  fi
+}
+
+# Personal hints are optional: only validate the file when it exists.
+doctor_hints_check() {
+  [ -f "$STORE_HOME/hints.json" ] || return 0
+  local herrs line
+  if ! herrs="$(validate_markers_file "$STORE_HOME/hints.json" validateHints hints)"; then
+    while IFS= read -r line; do dprob "BAD HINTS: $line"; done <<< "$herrs"
   fi
 }
 
@@ -1106,31 +1127,32 @@ cmd_grep() {
 # Validate a markers JSON file via learn-core.js validateMarkers(json) (array of
 # error strings, empty = ok). Errors go to stdout, one per line; returns 1 if any.
 # Without node, learn-core.js, or the export: JSON-syntax check only (with a warning).
-validate_markers_file() {   # validate_markers_file <file>
-  local out rc=0
+validate_markers_file() {   # validate_markers_file <file> [validator] [label]
+  local out rc=0 fn="${2:-validateMarkers}" label="${3:-markers}"
   if ! command -v node >/dev/null 2>&1; then
-    warn "warning: node not found; markers not validated"
+    warn "warning: node not found; $label not validated"
     return 0
   fi
-  out="$(L_FILE="$1" L_CORE="$OPENCODE_DIR/learn-core.js" node -e '
+  out="$(L_FILE="$1" L_FN="$fn" L_CORE="$OPENCODE_DIR/learn-core.js" node -e '
     const fs = require("fs");
     const { pathToFileURL } = require("url");
     let j;
     try { j = JSON.parse(fs.readFileSync(process.env.L_FILE, "utf8")); }
     catch (e) { console.log("not valid JSON: " + e.message); process.exit(1); }
     import(pathToFileURL(process.env.L_CORE).href).then((m) => {
-      if (typeof m.validateMarkers !== "function") {
-        console.error("learn: warning: validateMarkers unavailable in learn-core.js; only JSON syntax checked");
+      const fn = process.env.L_FN;
+      if (typeof m[fn] !== "function") {
+        console.error("learn: warning: " + fn + " unavailable in learn-core.js; only JSON syntax checked");
         return;
       }
-      const errs = m.validateMarkers(j) || [];
+      const errs = m[fn](j) || [];
       if (errs.length) { for (const e of errs) console.log(e); process.exit(1); }
     }).catch((e) => {
       console.error("learn: warning: cannot load learn-core.js (" + (e && e.message ? e.message : e) + "); only JSON syntax checked");
     });
   ')" || rc=$?
   if [ "$rc" -ne 0 ]; then
-    [ -n "$out" ] || out="markers validation failed (exit $rc)"
+    [ -n "$out" ] || out="$label validation failed (exit $rc)"
     printf '%s\n' "$out"
     return 1
   fi
@@ -1348,10 +1370,11 @@ dream_scan_profile() {   # dream_scan_profile <profile> <stale-days> <today-days
   PDIR="$(cd -P "$STORE_HOME/$prof" && pwd -P)"
 
   ack="$(read_ack)"
-  out="$(inbox_stream compact "" "$ack" "" "")"
+  out="$(inbox_stream compact "" "$ack" "" "" "" 1)"
   if [ -n "$out" ]; then
+    # Unacked count uses the arrival key; oldest/newest show event time (ts).
     cnt="$(printf '%s\n' "$out" | grep -c '')"
-    tss="$(printf '%s\n' "$out" | awk '{ print $1 }' | LC_ALL=C sort)"
+    tss="$(printf '%s\n' "$out" | cut -f2- | awk '{ print $1 }' | LC_ALL=C sort)"
     oldest="$(printf '%s\n' "$tss" | sed -n '1p')"
     newest="$(printf '%s\n' "$tss" | tail -n 1)"
     D_UNACKED_N=$((D_UNACKED_N + cnt))

@@ -98,6 +98,8 @@ Choose the narrowest owner that fixes the behavior:
 | Situation | Owner | Layer |
 |---|---|---|
 | Mechanically checkable | script / hook / lint | repo |
+| A recognizable tool error message | plugin hint | `hint:<id>`, in `opencode/hints.default.json` (generic) or `~/.agent-learnings/hints.json` (user-specific) |
+| A shell or tool default setting | config file | `config:<path>`, for example `~/.zshenv` |
 | An existing skill failed | patch that skill | wherever it lives |
 | Repeated procedure, 1 repo | new skill | `<repo>/.agents/skills` |
 | Repeats in ≥2 repos of a profile | new skill | `.agents-configs/common/<profile>/skills` |
@@ -119,7 +121,7 @@ Before touching any file, show the user and wait for approve:
 ```markdown
 ## Proposal: <pattern-key> (seen=N, projects: a, b)
 - **Future behavior:** imperative, 1–3 lines.
-- **Owner:** script:<path> | skill:<name> | new-skill:<name> | agents:<repo> (suggestion)
+- **Owner:** script:<path> | skill:<name> | new-skill:<name> | agents:<repo> (suggestion) | config:<path> | hint:<id>
 - **Layer:** repo | <repo>/.agents/skills | common/<profile> | ~/.agents/skills
 - **Write boundary:** exact files that will change (and nothing else).
 - **Change:** unified diff, or skeleton of the new skill (name, description, key rules).
@@ -136,7 +138,7 @@ After approve, change **exactly one owner**.
 - New skill → create it through the `writing-skills` skill. Keep it small; put only the behavior, not the evidence.
 - Patching a skill in `~/.agents/skills`: warn the user that `npx skills` may overwrite it later; prefer a fork under `.agents-configs/common/<profile>/skills`.
 - `AGENTS.md` is never edited without approve, and only for the repo named in the proposal.
-- Record it: `learn apply <key> --owner <script:path|skill:name|new-skill:name|agents:repo> --change-ref <commit|path>`.
+- Record it: `learn apply <key> --owner <script:path|skill:name|new-skill:name|agents:repo|config:path|hint:id> --change-ref <commit|path>`.
 - Then run `learn backup`.
 
 ## Terminal states

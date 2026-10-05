@@ -1,5 +1,5 @@
 import { spawn as nodeSpawn } from "node:child_process"
-import { realpathSync } from "node:fs"
+import { realpathSync, statSync } from "node:fs"
 import { appendFile, mkdir, open, readdir, readFile, readlink, realpath } from "node:fs/promises"
 import { homedir } from "node:os"
 import { basename, dirname, join, resolve, sep } from "node:path"
@@ -9,8 +9,11 @@ import {
   OPEN,
   buildInjection,
   detectToolFailure,
+  applyHint,
   inboxLine,
+  loadHints,
   loadMarkers,
+  matchHint,
   stripWrappingQuotes,
   matchMarkers,
   redact,
@@ -25,6 +28,9 @@ try {
 }
 const learnCli = resolve(moduleDirectory, "..", "bin", "learn")
 const defaultMarkersPath = join(moduleDirectory, "markers.default.json")
+
+const defaultHintsPath = join(moduleDirectory, "hints.default.json")
+const HINTS_TTL_MS = 5_000
 
 const BACKUP_EVENTS = new Set(["session.execution.succeeded", "session.execution.failed", "session.execution.interrupted"])
 const INERT_RECHECK_MS = 10_000
@@ -155,26 +161,70 @@ export default {
       await appendFile(join(inbox, `${event.ts.slice(0, 10)}.jsonl`), inboxLine(event))
     }
 
-    async function onToolAfter(ev) {
+    // Hints are cached; reloaded when either file's mtime changes or after a short TTL.
+    let hintCache
+    function currentHints() {
+      const now = Date.now()
+      const personalPath = join(storeRoot, "hints.json")
+      const mtime = (path) => {
+        try {
+          return statSync(path).mtimeMs
+        } catch {
+          return 0
+        }
+      }
+      if (hintCache && now - hintCache.at < HINTS_TTL_MS) return hintCache.hints
+      const a = mtime(defaultHintsPath)
+      const b = mtime(personalPath)
+      if (!hintCache || hintCache.a !== a || hintCache.b !== b) {
+        hintCache = { hints: loadHints(defaultHintsPath, personalPath), a, b, at: now }
+      } else hintCache.at = now
+      return hintCache.hints
+    }
+
+    // Synchronous part: must run before any await so the mutation lands before
+    // OpenCode reads the event back. Returns { failure, hint } for the async part.
+    function applyHintSync(ev) {
+      try {
+        // Detect first: the appended hint must not leak into the captured head.
+        const failure = detectToolFailure(ev)
+        if (!failure) return {}
+        const match = matchHint(ev, currentHints())
+        if (!match) return { failure }
+        return { failure, hint: applyHint(ev, match) ? match.id : undefined }
+      } catch (error) {
+        debug("hint failed", { error: String(error) })
+        return {}
+      }
+    }
+
+    function onToolAfter(ev) {
+      const sync = applyHintSync(ev)
+      return captureToolAfter(ev, sync)
+    }
+
+    async function captureToolAfter(ev, sync) {
       try {
         debug("execute.after", { status: ev?.status, tool: ev?.tool })
         const state = await sessionState(ev?.sessionID)
         if (!state) return
         state.toolSinceLastPrompt = true
         state.lastTool = ev.tool
-        const failure = detectToolFailure(ev)
+        const failure = sync.failure
         if (!failure) return
         const head = redact(failure.head)
         if (!head || state.heads.has(head)) return
         addBounded(state.heads, head)
-        await writeEvent(state, {
+        const event = {
           ts: timestamp(),
           kind: "failure",
           tool: failure.tool,
           head,
           project: state.project,
           session: ev.sessionID,
-        })
+        }
+        if (sync.hint) event.hint = sync.hint
+        await writeEvent(state, event)
       } catch (error) {
         debug("execute.after failed", { error: String(error) })
       }
@@ -237,7 +287,9 @@ export default {
       try {
         files = (await readdir(inbox)).filter((name) => {
           if (!name.endsWith(".jsonl")) return false
-          // Files named YYYY-MM-DD older than the ack day hold only acked events.
+          // Inbox files are named by ARRIVAL date (a backfill writes
+          // `inbox/<arrival-date>-backfill.jsonl`), so files named YYYY-MM-DD
+          // older than the ack day hold only acked events.
           return !(ackDay && /^\d{4}-\d{2}-\d{2}\.jsonl$/.test(name) && name.slice(0, 10) < ackDay)
         })
       } catch {
@@ -254,8 +306,10 @@ export default {
         for (const line of content.split("\n")) {
           if (!line.trim()) continue
           try {
-            const ts = Date.parse(JSON.parse(line).ts)
-            if (Number.isNaN(ts) || ts > ack) count += 1
+            const parsed = JSON.parse(line)
+            // Arrival key: `ats` (set by backfills) when present, else `ts`.
+            const key = Date.parse(parsed.ats || parsed.ts)
+            if (Number.isNaN(key) || key > ack) count += 1
           } catch {
             // Skip malformed lines.
           }

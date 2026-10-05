@@ -502,3 +502,111 @@ test("hook registration failure is logged unconditionally", async () => {
     rmSync(fx.root, { recursive: true, force: true })
   }
 })
+
+test("hint is applied synchronously, before the returned promise settles", async () => {
+  const fx = fixture()
+  const p = await start(fx)
+  try {
+    const ev = { status: "error", tool: "edit", sessionID: "ses_1", error: { message: "Could not find oldString in x.js" } }
+    const pending = p.hooks["tool:execute.after"](ev)
+    // No await yet: the mutation must already be visible.
+    assert.ok(ev.error.message.includes("Hint: your copy of this file is stale"), ev.error.message)
+    await pending
+    assert.equal(ev.error.message.split("Hint: your copy").length, 2)
+
+    const shell = {
+      status: "completed",
+      tool: "shell",
+      sessionID: "ses_1",
+      result: { content: [{ type: "text", text: "zsh: read-only variable: status" }], metadata: { metadata: { exit: 1 } } },
+    }
+    const pending2 = p.hooks["tool:execute.after"](shell)
+    assert.equal(shell.result.content.length, 2)
+    await pending2
+  } finally {
+    p.cleanup()
+    rmSync(fx.root, { recursive: true, force: true })
+  }
+})
+
+test("inbox failure event carries the hint id; the hint text is not in the head", async () => {
+  const fx = fixture()
+  const p = await start(fx)
+  try {
+    await p.hooks["tool:execute.after"]({ status: "error", tool: "edit", sessionID: "ses_1", error: { message: "Could not find oldString in x.js" } })
+    await p.hooks["tool:execute.after"]({ status: "error", tool: "bash", sessionID: "ses_1", error: { message: "exit 2: other" } })
+    const [hinted, plain] = inboxEvents(fx)
+    assert.equal(hinted.hint, "patch-reread")
+    assert.ok(!hinted.head.includes("Hint:"), hinted.head)
+    assert.equal(plain.hint, undefined)
+  } finally {
+    p.cleanup()
+    rmSync(fx.root, { recursive: true, force: true })
+  }
+})
+
+test("inert session still gets the hint but writes nothing", async () => {
+  const fx = fixture({ learnings: false })
+  const p = await start(fx)
+  try {
+    const ev = { status: "error", tool: "grep", sessionID: "ses_1", error: { message: "regex parse error: look-around" } }
+    const pending = p.hooks["tool:execute.after"](ev)
+    assert.ok(ev.error.message.includes("Hint: grep uses ripgrep"))
+    await pending
+    assert.equal(inboxEvents(fx).length, 0)
+  } finally {
+    p.cleanup()
+    rmSync(fx.root, { recursive: true, force: true })
+  }
+})
+
+test("subagent session gets the hint too", async () => {
+  const fx = fixture()
+  const p = await start(fx)
+  try {
+    const ev = { status: "error", tool: "patch", sessionID: "ses_sub", error: { message: "Invalid Add File line: x" } }
+    await p.hooks["tool:execute.after"](ev)
+    assert.ok(ev.error.message.includes("Add File body must start"))
+  } finally {
+    p.cleanup()
+    rmSync(fx.root, { recursive: true, force: true })
+  }
+})
+
+test("personal hints.json in the store is merged and overrides by id", async () => {
+  const fx = fixture()
+  writeFileSync(
+    join(fx.store, "hints.json"),
+    JSON.stringify({ version: 1, hints: [{ id: "mine", tools: ["bash"], match: "boom", text: "Hint: mine" }] }),
+  )
+  const p = await start(fx)
+  try {
+    const ev = { status: "error", tool: "bash", sessionID: "ses_1", error: { message: "exit 1: boom" } }
+    await p.hooks["tool:execute.after"](ev)
+    assert.ok(ev.error.message.endsWith("Hint: mine"))
+    assert.equal(inboxEvents(fx)[0].hint, "mine")
+  } finally {
+    p.cleanup()
+    rmSync(fx.root, { recursive: true, force: true })
+  }
+})
+
+test("unacked count uses ats (arrival key) when present, mixed with plain events", async () => {
+  const fx = fixture()
+  // Backfill: old ts, arrival after the ack. Plain old event is acked. Plain new event counts.
+  writeFileSync(
+    join(fx.store, "work", "inbox", "2026-10-01-backfill.jsonl"),
+    `{"ts":"2026-01-05T08:00:00Z","ats":"2026-10-01T09:00:00Z","kind":"failure"}\n{"ts":"2026-01-06T08:00:00Z","kind":"failure"}\n{"ts":"2026-10-01T10:00:00Z","kind":"failure"}\n`,
+  )
+  writeFileSync(join(fx.store, "work", "inbox", ".ack"), "2026-09-30T00:00:00Z\n")
+  const p = await start(fx)
+  try {
+    const ev = { sessionID: "ses_1", system: [] }
+    await p.hooks["session:context"](ev)
+    assert.equal(ev.system.length, 1)
+    assert.ok(ev.system[0].text.includes("2 unprocessed events"), ev.system[0].text)
+  } finally {
+    p.cleanup()
+    rmSync(fx.root, { recursive: true, force: true })
+  }
+})

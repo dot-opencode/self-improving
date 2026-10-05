@@ -25,6 +25,7 @@ PASSES=0
 OUT=""
 RC=0
 
+STORE_HOME_T="$AGENT_LEARNINGS_HOME"
 pass() { PASSES=$((PASSES + 1)); echo "PASS: $1"; }
 fail() { FAILS=$((FAILS + 1)); echo "FAIL: $1"; [ -z "${2:-}" ] || printf '      %s\n' "$2"; }
 
@@ -160,6 +161,13 @@ expect_ok "add with newline in owner" add --key tool.owner-nl --kind workflow --
 check "add owner newline flattened" test "$(fmval "$PDIR/candidates/tool.owner-nl.md" suggested-owner)" = "skill:a b"
 expect_ok "apply new-skill owner (flattened)" apply tool.owner-nl --owner $'new-skill:foo\nbar' --change-ref "r1"
 check "apply owner newline flattened" test "$(fmval "$PDIR/applied/tool.owner-nl.md" owner)" = "new-skill:foo bar"
+expect_ok "add for config owner" add --key tool.owner-config --kind workflow --summary "config owner" --evidence "e"
+expect_ok "apply config: owner" apply tool.owner-config --owner "config:~/.zshenv" --change-ref "r2"
+check "apply config owner recorded" test "$(fmval "$PDIR/applied/tool.owner-config.md" owner)" = "config:~/.zshenv"
+expect_ok "add for hint owner" add --key tool.owner-hint --kind workflow --summary "hint owner" --evidence "e"
+expect_ok "apply hint: owner" apply tool.owner-hint --owner "hint:patch-reread" --change-ref "r3"
+check "apply hint owner recorded" test "$(fmval "$PDIR/applied/tool.owner-hint.md" owner)" = "hint:patch-reread"
+expect_die "apply error text lists config: and hint:" "config:<path> | hint:<id>" apply nonexistent.key --owner nonsense --change-ref x
 expect_ok "apply" apply test.wrong-cwd --owner "skill:pytest" --change-ref "abc123"
 A="$PDIR/applied/test.wrong-cwd.md"
 check "apply moved to applied/" test -f "$A" -a ! -f "$F"
@@ -291,6 +299,14 @@ run doctor
 if [ "$RC" -eq 0 ]; then pass "doctor clean after owner restored"; else fail "doctor clean after owner restored" "$OUT"; fi
 run doctor
 if [ "$RC" -eq 0 ]; then pass "doctor accepts new-skill: owner"; else fail "doctor accepts new-skill: owner" "$OUT"; fi
+run doctor
+if [ "$RC" -eq 0 ]; then pass "doctor accepts config: and hint: owners"; else fail "doctor accepts config:/hint: owners" "$OUT"; fi
+printf '%s\n' '{"version":1,"hints":[{"id":"x","tools":["grep"],"match":"(","text":"t"}]}' > "$STORE_HOME_T/hints.json"
+expect_die "doctor flags bad personal hints.json" "BAD HINTS" doctor
+printf '%s\n' '{"version":1,"hints":[{"id":"x","tools":["grep"],"match":"boom","text":"t"}]}' > "$STORE_HOME_T/hints.json"
+run doctor
+if [ "$RC" -eq 0 ]; then pass "doctor accepts valid personal hints.json"; else fail "doctor valid hints.json" "$OUT"; fi
+rm -f "$STORE_HOME_T/hints.json"
 cp "$PDIR/applied/tool.owner-nl.md" "$TMP/owner-nl.bak"
 fm_tmp="$PDIR/applied/tool.owner-nl.md"
 sed 's/^owner: .*$/owner: bogus:x/' "$fm_tmp" > "$fm_tmp.tmp" && mv "$fm_tmp.tmp" "$fm_tmp"
@@ -384,6 +400,14 @@ check "newest inbox files kept" test -f "$PDIR/inbox/2026-09-29.jsonl" -a -f "$P
 run prune --days 30
 expect_contains "prune --days 30 removes more" "removed 1 acked inbox file(s)"
 check "mid-age inbox file removed at --days 30" test ! -e "$PDIR/inbox/2026-08-01.jsonl"
+# backfill files are named by arrival date (<date>-backfill.jsonl) and age the same way
+printf '{"ts":"2026-01-01T10:00:00Z","ats":"2026-05-02T10:00:00Z","kind":"failure","tool":"bash","head":"bf-old","project":"p"}\n' > "$PDIR/inbox/2026-05-02-backfill.jsonl"
+printf '{"ts":"2026-01-01T10:00:00Z","ats":"2026-09-29T10:00:00Z","kind":"failure","tool":"bash","head":"bf-new","project":"p"}\n' > "$PDIR/inbox/2026-09-29-backfill.jsonl"
+run prune --days 30
+expect_contains "prune counts an old backfill file" "removed 1 acked inbox file(s)"
+check "old acked backfill file removed" test ! -e "$PDIR/inbox/2026-05-02-backfill.jsonl"
+check "recent backfill file kept" test -f "$PDIR/inbox/2026-09-29-backfill.jsonl"
+rm -f "$PDIR/inbox/2026-09-29-backfill.jsonl"
 unset LEARN_TODAY
 run doctor
 if [ "$RC" -eq 0 ]; then pass "doctor clean after prune"; else fail "doctor clean after prune" "$OUT"; fi
@@ -799,6 +823,35 @@ expect_contains "inbox parses spaced JSON" "2026-07-22T10:00:00Z  failure  proj-
 expect_contains "inbox trailer from spaced JSON" "ack: learn ack --until 2026-07-22T10:00:00Z"
 OUT="$(AGENT_LEARNINGS_HOME="$SSTORE" "$LEARN" dream --report 2>&1)"
 expect_contains "dream --report oldest/newest from spaced JSON" "oldest 2026-07-22T10:00:00Z, newest 2026-07-22T10:00:00Z"
+
+# --- ats: arrival key ------------------------------------------------------------
+ASTORE="$TMP/astore"
+mkdir -p "$ASTORE/work/inbox" "$ASTORE/work/candidates" "$ASTORE/work/applied" "$ASTORE/work/rejected"
+git -C "$ASTORE" init -q
+aev() { printf '{"ts":"%s","kind":"failure","tool":"bash","head":"%s","project":"proj-a"}\n' "$1" "$2"; }
+aev2() { printf '{"ts":"%s","ats":"%s","kind":"failure","tool":"bash","head":"%s","project":"proj-a"}\n' "$1" "$2" "$3"; }
+{ aev 2026-09-30T10:00:00Z plain1; aev2 2026-01-05T08:00:00Z 2026-09-30T12:00:00Z backfilled; aev 2026-09-30T11:00:00Z plain2; } > "$ASTORE/work/inbox/2026-09-30.jsonl"
+al() { AGENT_LEARNINGS_HOME="$ASTORE" "$LEARN" "$@"; }
+al ack --profile work --until 2026-09-30T10:30:00Z >/dev/null 2>&1
+OUT="$(al inbox --profile work 2>&1)"
+if [ "$(printf '%s\n' "$OUT" | grep -c '^2026-')" = "2" ]; then pass "ats: old-ts event with new ats shown after ack"; else fail "ats shown after ack" "$OUT"; fi
+if [ "$(printf '%s\n' "$OUT" | grep '^2026-' | awk '{print $1}' | paste -sd' ' -)" = "2026-09-30T11:00:00Z 2026-01-05T08:00:00Z" ]; then pass "ats: ordered by ats, ts column still shown"; else fail "ats order" "$OUT"; fi
+expect_contains "ats: trailer prints max ats" "ack: learn ack --until 2026-09-30T12:00:00Z"
+OUT="$(al inbox --profile work --json 2>&1)"
+if [ "$(printf '%s\n' "$OUT" | grep -c '^{')" = "2" ] && [[ "$OUT" == *'"ats":"2026-09-30T12:00:00Z"'* ]]; then pass "ats: --json prints raw lines"; else fail "ats --json" "$OUT"; fi
+OUT="$(al inbox --profile work --since 2026-06-01T00:00:00Z 2>&1)"
+if [ "$(printf '%s\n' "$OUT" | grep -c '^2026-')" = "1" ]; then pass "ats: --since filters on ts"; else fail "ats --since" "$OUT"; fi
+OUT="$(al dream --report 2>&1)"
+expect_contains "ats: dream --report counts by key, oldest/newest by ts" "2 event(s), oldest 2026-01-05T08:00:00Z, newest 2026-09-30T11:00:00Z"
+al ack --profile work --until 2026-09-30T12:00:00Z >/dev/null 2>&1
+OUT="$(al inbox --profile work 2>&1)"
+expect_contains "ats: acking up to max ats hides the event" "(no events)"
+# --limit tie extension on ats
+{ aev2 2026-01-01T00:00:00Z 2026-10-01T00:00:01Z t1; aev2 2026-01-02T00:00:00Z 2026-10-01T00:00:02Z t2; aev2 2026-01-03T00:00:00Z 2026-10-01T00:00:02Z t3; aev 2026-10-01T00:00:03Z t4; } > "$ASTORE/work/inbox/2026-10-01-backfill.jsonl"
+OUT="$(al inbox --profile work --limit 2 2>&1)"
+if [ "$(printf '%s\n' "$OUT" | grep -c '^2026-')" = "3" ]; then pass "ats: --limit 2 extends tie on ats (3 events)"; else fail "ats --limit tie" "$OUT"; fi
+expect_contains "ats: --limit trailer is max ats of batch" "ack: learn ack --until 2026-10-01T00:00:02Z"
+expect_not_contains "ats: --limit excludes next key" "t4"
 
 echo
 echo "passed: $PASSES, failed: $FAILS"
