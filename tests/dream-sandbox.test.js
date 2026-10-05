@@ -170,6 +170,50 @@ test("sandbox simulation: --from drafts and plain commands allowed, free text an
   }
 });
 
+const render = () =>
+  JSON.parse(
+    JSON.stringify(template)
+      .replaceAll("__LEARN_BIN__", "/opt/learn")
+      .replaceAll("__STORE__", "/store")
+      .replaceAll("__HOME__", "/home/u"),
+  );
+
+const READONLY_ALLOW = [
+  "git -C /w/repo check-ignore -v a/b.md",
+  "git -C /w/repo ls-files docs",
+  "git -C /w/repo rev-list --count HEAD",
+  "git -C /w/repo merge-base --is-ancestor a b",
+  "git -C /w/repo for-each-ref --contains abc refs/heads refs/remotes",
+  "which task",
+];
+const READONLY_DENY = [
+  "git -C /w/repo check-ignore a; rm -rf x",
+  "which task | sh",
+  "git -C /w/repo branch -a --contains abc",
+  "git -C /w/repo for-each-ref --contains a && rm x",
+  "git -C /w/repo rev-list $(rm x)",
+  "git -C /w/repo ls-files > out",
+];
+const checkReadonly = (rules, label) => {
+  for (const pre of ["", "rtk "]) {
+    for (const cmd of READONLY_ALLOW) assert.equal(shellDecision(rules, pre + cmd), "allow", `${label} allowed: ${pre}${cmd}`);
+    for (const cmd of READONLY_DENY) assert.equal(shellDecision(rules, pre + cmd), "deny", `${label} denied: ${pre}${cmd}`);
+  }
+};
+
+test("sandbox simulation: extra read-only git and which allowed, injection and git branch denied", () => {
+  const rendered = render();
+  checkReadonly(shellRules(rendered.agents["learn-dream"].permissions), "learn-dream");
+  checkReadonly(shellRules(rendered.agents["learn-dream-check"].permissions), "learn-dream-check");
+});
+
+test("sandbox simulation: experimental.policies behave the same", () => {
+  const rules = render()
+    .experimental.policies.filter((p) => p.action === "permission" && p.resource.startsWith("shell:"))
+    .map((p) => ({ action: "shell", resource: p.resource.slice("shell:".length), effect: p.effect }));
+  checkReadonly(rules, "policies");
+});
+
 test("print-config substitutes every placeholder and stays valid JSON", () => {
   const tmp = realpathSync(mkdtempSync(join(tmpdir(), "learn-dream-")));
   try {
