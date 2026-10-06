@@ -1,5 +1,5 @@
 import assert from "node:assert/strict"
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { test } from "node:test"
@@ -10,8 +10,8 @@ import { applyHint, loadHints, matchHint, validateHints } from "../skills/self-i
 const defaultPath = fileURLToPath(new URL("../skills/self-improving/opencode/hints.default.json", import.meta.url))
 const hints = loadHints(defaultPath, undefined)
 
-test("default hints: exactly the four shipped ids and valid", () => {
-  assert.deepEqual(hints.map((h) => h.id), ["patch-reread", "patch-add-file", "grep-regex", "zsh-status-var", "read-offset-number"])
+test("default hints: exactly the shipped ids and valid", () => {
+  assert.deepEqual(hints.map((h) => h.id), ["patch-reread", "patch-add-file", "grep-regex", "zsh-status-var", "read-offset-number", "memory-symlink-pathspec"])
   assert.deepEqual(validateHints(JSON.parse(readFileSync(defaultPath, "utf8"))), [])
 })
 
@@ -93,7 +93,7 @@ test("personal hints: same id replaces default, new ids are added after", () => 
       }),
     )
     const merged = loadHints(defaultPath, personal)
-    assert.deepEqual(merged.map((h) => h.id).sort(), ["grep-regex", "mine", "patch-add-file", "patch-reread", "read-offset-number", "zsh-status-var"])
+    assert.deepEqual(merged.map((h) => h.id).sort(), ["grep-regex", "memory-symlink-pathspec", "mine", "patch-add-file", "patch-reread", "read-offset-number", "zsh-status-var"])
     assert.equal(merged.filter((h) => h.id === "patch-reread").length, 1)
     const ev = { status: "error", tool: "edit", error: { message: "Could not find oldString" } }
     assert.equal(matchHint(ev, merged), undefined) // default regex replaced
@@ -138,4 +138,63 @@ test("read offset given as a range gets read-offset-number (both error formats)"
   assert.equal(matchHint(negative, hints), undefined)
   const otherTool = { tool: "grep", status: "error", error: { message: "offset: Expected number" } }
   assert.equal(matchHint(otherTool, hints), undefined)
+})
+
+const shellEv = (text, exit = 128, tool = "shell") => ({ status: "completed", tool, result: { content: [{ type: "text", text }], metadata: { metadata: { exit } } } })
+
+test("git pathspec beyond a symlink under .memory gets memory-symlink-pathspec", () => {
+  for (const tool of ["shell", "bash"]) {
+    assert.equal(matchHint(shellEv("fatal: pathspec '.memory/project/INDEX.md' is beyond a symbolic link", 128, tool), hints)?.id, "memory-symlink-pathspec")
+  }
+  assert.equal(matchHint(shellEv("fatal: pathspec '.memory' is beyond a symbolic link", 128), hints)?.id, "memory-symlink-pathspec")
+  assert.equal(matchHint(shellEv("fatal: pathspec 'app/.memory/x.md' is beyond a symbolic link", 128), hints)?.id, "memory-symlink-pathspec")
+})
+
+test("memory-symlink-pathspec: other symlinks, exit 0 and other tools do not match", () => {
+  assert.equal(matchHint(shellEv("fatal: pathspec 'config/link/file.txt' is beyond a symbolic link"), hints), undefined)
+  assert.equal(matchHint(shellEv("fatal: pathspec '.memoryx/a' is beyond a symbolic link"), hints), undefined)
+  assert.equal(matchHint(shellEv("fatal: pathspec '.memory/a' did not match any files"), hints), undefined)
+  assert.equal(matchHint(shellEv("fatal: pathspec '.memory/a' is beyond a symbolic link", 0), hints), undefined)
+  assert.equal(matchHint({ status: "error", tool: "read", error: { message: "pathspec '.memory/a' is beyond a symbolic link" } }, hints), undefined)
+})
+
+const personalHints = () => {
+  const dir = mkdtempSync(join(tmpdir(), "si-hints-"))
+  const personal = join(dir, "hints.json")
+  writeFileSync(
+    personal,
+    JSON.stringify({
+      version: 1,
+      hints: [
+        {
+          id: "youtrack-work-type",
+          tools: ["youtrack-mcp_get_allowed_values", "youtrack_get_allowed_values"],
+          match: "Field not found:\\s*Work type\\b",
+          text: "Hint: Work type is a draft-only classification in this user's task-drafting workflow, not a YouTrack custom field. Do not query or write it as a field. Resolve real fields from the project's live schema; do not assume a fixed list.",
+        },
+      ],
+    }),
+  )
+  return { dir, merged: loadHints(defaultPath, personal), json: JSON.parse(readFileSync(personal, "utf8")) }
+}
+
+test("personal youtrack-work-type: matches Work type field-not-found only", () => {
+  const { dir, merged, json } = personalHints()
+  try {
+    assert.deepEqual(validateHints(json), [])
+    for (const tool of ["youtrack-mcp_get_allowed_values", "youtrack_get_allowed_values"]) {
+      const ev = { status: "error", tool, error: { message: "FIELD_NOT_FOUND: Field not found: Work type" } }
+      assert.equal(matchHint(ev, merged)?.id, "youtrack-work-type")
+    }
+    const lower = { status: "error", tool: "youtrack_get_allowed_values", error: { message: "field not found: work type" } }
+    assert.equal(matchHint(lower, merged)?.id, "youtrack-work-type")
+    const risk = { status: "error", tool: "youtrack-mcp_get_allowed_values", error: { message: "FIELD_NOT_FOUND: Field not found: Risk" } }
+    assert.equal(matchHint(risk, merged), undefined)
+    const wrongTool = { status: "error", tool: "youtrack-mcp_get_issue", error: { message: "FIELD_NOT_FOUND: Field not found: Work type" } }
+    assert.equal(matchHint(wrongTool, merged), undefined)
+    const success = { status: "completed", tool: "youtrack-mcp_get_allowed_values", result: { content: [{ type: "text", text: "Work type values" }] } }
+    assert.equal(matchHint(success, merged), undefined)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })

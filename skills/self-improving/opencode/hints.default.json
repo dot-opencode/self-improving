@@ -44,6 +44,15 @@
       ],
       "match": "offset: Expected number|Expected number[^\\n]*got \\[[^\\n]*at \\[\"offset\"\\]",
       "text": "Hint: offset is a single line number, not a range. Use offset=<first line> and limit=<line count>, e.g. offset: 280, limit: 51 for lines 280-330."
+    },
+    {
+      "id": "memory-symlink-pathspec",
+      "tools": [
+        "shell",
+        "bash"
+      ],
+      "match": "pathspec\\s+'(?:[^'\\n]*/)?\\.memory(?:/[^'\\n]*)?'\\s+is beyond a symbolic link",
+      "text": "Hint: .memory/project and other .memory levels are symlinks into a separate memory store, not files to stage in this project. Rebuild indexes with memory index and save the memory store with memory backup. Do not force-add .memory paths."
     }
   ]
 }
