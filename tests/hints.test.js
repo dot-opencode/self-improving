@@ -11,7 +11,7 @@ const defaultPath = fileURLToPath(new URL("../skills/self-improving/opencode/hin
 const hints = loadHints(defaultPath, undefined)
 
 test("default hints: exactly the four shipped ids and valid", () => {
-  assert.deepEqual(hints.map((h) => h.id), ["patch-reread", "patch-add-file", "grep-regex", "zsh-status-var"])
+  assert.deepEqual(hints.map((h) => h.id), ["patch-reread", "patch-add-file", "grep-regex", "zsh-status-var", "read-offset-number"])
   assert.deepEqual(validateHints(JSON.parse(readFileSync(defaultPath, "utf8"))), [])
 })
 
@@ -93,14 +93,14 @@ test("personal hints: same id replaces default, new ids are added after", () => 
       }),
     )
     const merged = loadHints(defaultPath, personal)
-    assert.deepEqual(merged.map((h) => h.id).sort(), ["grep-regex", "mine", "patch-add-file", "patch-reread", "zsh-status-var"])
+    assert.deepEqual(merged.map((h) => h.id).sort(), ["grep-regex", "mine", "patch-add-file", "patch-reread", "read-offset-number", "zsh-status-var"])
     assert.equal(merged.filter((h) => h.id === "patch-reread").length, 1)
     const ev = { status: "error", tool: "edit", error: { message: "Could not find oldString" } }
     assert.equal(matchHint(ev, merged), undefined) // default regex replaced
     const ev2 = { status: "error", tool: "edit", error: { message: "file is stale" } }
     assert.equal(matchHint(ev2, merged).text, "Hint: mine")
     // Missing/garbage personal file is ignored.
-    assert.equal(loadHints(defaultPath, join(dir, "nope.json")).length, 4)
+    assert.equal(loadHints(defaultPath, join(dir, "nope.json")).length, loadHints(defaultPath).length)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
@@ -126,4 +126,16 @@ test("validateHints reports errors", () => {
   assert.ok(errs.some((e) => e.includes("text")))
   assert.ok(errs.some((e) => e.includes("hints[2].id")))
   assert.ok(errs.some((e) => e.includes("hints[3]")))
+})
+
+test("read offset given as a range gets read-offset-number (both error formats)", () => {
+  const hints = loadHints(defaultPath)
+  const zod = { tool: "read", status: "error", error: { message: 'Invalid arguments for tool "read": - offset: Expected number Arguments provided: { "path": "/x", "offset": [280, 330] }' } }
+  const schema = { tool: "read", status: "error", error: { message: 'The read tool was called with invalid arguments: SchemaError(Expected number | undefined, got [450,750] at ["offset"]). Please rewrite the input so it satisfies the expected schema.' } }
+  assert.equal(matchHint(zod, hints)?.id, "read-offset-number")
+  assert.equal(matchHint(schema, hints)?.id, "read-offset-number")
+  const negative = { tool: "read", status: "error", error: { message: 'The read tool was called with invalid arguments: SchemaError(Expected a value greater than or equal to 0, got -40 at ["offset"]).' } }
+  assert.equal(matchHint(negative, hints), undefined)
+  const otherTool = { tool: "grep", status: "error", error: { message: "offset: Expected number" } }
+  assert.equal(matchHint(otherTool, hints), undefined)
 })

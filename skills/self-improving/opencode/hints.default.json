@@ -3,27 +3,47 @@
   "hints": [
     {
       "id": "patch-reread",
-      "tools": ["patch", "apply_patch", "edit"],
+      "tools": [
+        "patch",
+        "apply_patch",
+        "edit"
+      ],
       "match": "Failed to find expected lines|Could not find oldString",
       "text": "Hint: your copy of this file is stale. Read the exact target lines again with the read tool (small offset/limit) and build the next patch from that text. Do not retry from memory or with trimmed context."
     },
     {
       "id": "patch-add-file",
-      "tools": ["patch", "apply_patch"],
+      "tools": [
+        "patch",
+        "apply_patch"
+      ],
       "match": "Invalid Add File line|unexpected line in Add File",
       "text": "Hint: every line of an Add File body must start with \"+\", including blank lines and code. To create a new file, prefer the write tool."
     },
     {
       "id": "grep-regex",
-      "tools": ["grep"],
+      "tools": [
+        "grep"
+      ],
       "match": "regex parse error|look-?around",
       "text": "Hint: grep uses ripgrep's Rust regex: no look-ahead or look-behind; escape literal ( ) { } [ ] with a backslash. For plain text, set literal: true if the tool offers it; to exclude matches, run a second, narrower search."
     },
     {
       "id": "zsh-status-var",
-      "tools": ["shell", "bash"],
+      "tools": [
+        "shell",
+        "bash"
+      ],
       "match": "read-only variable: status",
       "text": "Hint: in zsh, status is a read-only special variable. Use another name, such as rc."
+    },
+    {
+      "id": "read-offset-number",
+      "tools": [
+        "read"
+      ],
+      "match": "offset: Expected number|Expected number[^\\n]*got \\[[^\\n]*at \\[\"offset\"\\]",
+      "text": "Hint: offset is a single line number, not a range. Use offset=<first line> and limit=<line count>, e.g. offset: 280, limit: 51 for lines 280-330."
     }
   ]
 }
