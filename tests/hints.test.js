@@ -11,7 +11,7 @@ const defaultPath = fileURLToPath(new URL("../skills/self-improving/opencode/hin
 const hints = loadHints(defaultPath, undefined)
 
 test("default hints: exactly the shipped ids and valid", () => {
-  assert.deepEqual(hints.map((h) => h.id), ["patch-reread", "patch-add-file", "grep-regex", "zsh-status-var", "read-offset-number", "memory-symlink-pathspec"])
+  assert.deepEqual(hints.map((h) => h.id), ["patch-reread", "patch-add-file", "grep-regex", "zsh-status-var", "read-offset-number", "memory-symlink-pathspec", "head-zero-count"])
   assert.deepEqual(validateHints(JSON.parse(readFileSync(defaultPath, "utf8"))), [])
 })
 
@@ -93,7 +93,7 @@ test("personal hints: same id replaces default, new ids are added after", () => 
       }),
     )
     const merged = loadHints(defaultPath, personal)
-    assert.deepEqual(merged.map((h) => h.id).sort(), ["grep-regex", "memory-symlink-pathspec", "mine", "patch-add-file", "patch-reread", "read-offset-number", "zsh-status-var"])
+    assert.deepEqual(merged.map((h) => h.id).sort(), ["grep-regex", "head-zero-count", "memory-symlink-pathspec", "mine", "patch-add-file", "patch-reread", "read-offset-number", "zsh-status-var"])
     assert.equal(merged.filter((h) => h.id === "patch-reread").length, 1)
     const ev = { status: "error", tool: "edit", error: { message: "Could not find oldString" } }
     assert.equal(matchHint(ev, merged), undefined) // default regex replaced
@@ -197,4 +197,19 @@ test("personal youtrack-work-type: matches Work type field-not-found only", () =
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+test("BSD head zero/negative count gets head-zero-count", () => {
+  for (const tool of ["shell", "bash"]) {
+    assert.equal(matchHint(shellEv("head: illegal line count -- 0", 1, tool), hints)?.id, "head-zero-count")
+  }
+  assert.equal(matchHint(shellEv("head: illegal byte count -- 0", 1), hints)?.id, "head-zero-count")
+  assert.equal(matchHint(shellEv("head: illegal line count -- -1", 1), hints)?.id, "head-zero-count")
+})
+
+test("head-zero-count: other counts, exit 0 and other tools do not match", () => {
+  assert.equal(matchHint(shellEv("head: illegal line count -- 0x", 1), hints), undefined)
+  assert.equal(matchHint(shellEv("head: illegal line count -- 10", 1), hints), undefined)
+  assert.equal(matchHint(shellEv("head: illegal line count -- 0", 0), hints), undefined)
+  assert.equal(matchHint({ status: "error", tool: "read", error: { message: "head: illegal line count -- 0" } }, hints), undefined)
 })

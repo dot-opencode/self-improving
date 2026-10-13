@@ -53,6 +53,15 @@
       ],
       "match": "pathspec\\s+'(?:[^'\\n]*/)?\\.memory(?:/[^'\\n]*)?'\\s+is beyond a symbolic link",
       "text": "Hint: .memory/project and other .memory levels are symlinks into a separate memory store, not files to stage in this project. Rebuild indexes with memory index and save the memory store with memory backup. Do not force-add .memory paths."
+    },
+    {
+      "id": "head-zero-count",
+      "tools": [
+        "shell",
+        "bash"
+      ],
+      "match": "head: illegal (?:line|byte) count -- (?:0|-\\d+)\\b",
+      "text": "Hint: BSD head on macOS rejects a zero or negative count (no GNU-style -n -N). Guard a computed count and skip head when it is not positive. To see the first lines of a file, use the read tool with limit instead of head."
     }
   ]
 }
