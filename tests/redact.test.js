@@ -201,3 +201,64 @@ test("detectToolFailure: real v2.0.20 shell payload — exit 3 captured, exit 0 
   const noisy = 'sed -n: 189-  if (/Traceback/.test(hit)) {\nError: handling code\n"Exited with code 3" in a string\n'
   assert.equal(detectToolFailure(V2_SHELL(0, noisy)), undefined)
 })
+
+test("redacts env-style secret assignments", () => {
+  const cases = [
+    ["AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCY", "wJalrXUtnFEMI"],
+    ["export GITHUB_TOKEN=abc123def end", "abc123def"],
+    ["DB_PASSWORD=\"p4ss word\" next", "p4ss"],
+    ["STRIPE_SECRET='sk_live_zzz yyy'", "sk_live_zzz"],
+    ["MY_SERVICE_KEY = topsecretvalue", "topsecretvalue"],
+  ]
+  for (const [input, secret] of cases) {
+    const out = redact(input)
+    assert.ok(!out.includes(secret), `${input} -> ${out}`)
+    assert.ok(out.includes("[redacted]"), out)
+  }
+})
+
+test("does not over-redact normal env/text", () => {
+  assert.equal(redact("KEY_NAME=value"), "KEY_NAME=value")
+  assert.equal(redact("PATH=/usr/bin"), "PATH=/usr/bin")
+  assert.equal(redact("the primary key is unique"), "the primary key is unique")
+  assert.equal(redact("MONKEY=banana"), "MONKEY=banana")
+  assert.equal(redact("TOKENIZER=bpe"), "TOKENIZER=bpe")
+})
+
+test("redacts PEM private key blocks, including truncated ones", () => {
+  const full = "before -----BEGIN RSA PRIVATE KEY-----\nMIIEabc\ndefGHI\n-----END RSA PRIVATE KEY----- after"
+  const out = redact(full)
+  assert.ok(!out.includes("MIIEabc") && !out.includes("defGHI"), out)
+  assert.equal(out, "before [redacted] after")
+  const cut = redact("oops -----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXk\nAAAA")
+  assert.ok(!cut.includes("b3BlbnNzaC1rZXk") && !cut.includes("AAAA"), cut)
+  assert.ok(cut.startsWith("oops [redacted]"), cut)
+  assert.ok(!redact("-----BEGIN PRIVATE KEY-----\nzzzz").includes("zzzz"))
+  assert.equal(redact("-----BEGIN CERTIFICATE-----\nabc"), "-----BEGIN CERTIFICATE----- abc")
+})
+
+test("detectToolFailure: non-string error.message is stringified safely", () => {
+  assert.equal(detectToolFailure({ status: "error", tool: "bash", error: { message: { code: 7 } } }).head, '{"code":7}')
+  assert.equal(detectToolFailure({ status: "error", tool: "bash", error: { message: 42 } }).head, "42")
+  const circular = {}
+  circular.self = circular
+  const head = detectToolFailure({ status: "error", tool: "bash", error: { message: circular } }).head
+  assert.equal(typeof head, "string")
+  assert.ok(!head.includes("[object Object]") || head === "[object Object]")
+  assert.notEqual(detectToolFailure({ status: "error", tool: "bash", error: { message: { a: 1 } } }).head, "[object Object]")
+})
+
+test("large inputs are bounded and fast", () => {
+  const big = "x".repeat(5 * 1024 * 1024)
+  let start = Date.now()
+  const out = redact(`${big} -----BEGIN PRIVATE KEY----- ${big}`)
+  assert.ok(out.length <= 300)
+  assert.ok(Date.now() - start < 1000, `redact took ${Date.now() - start}ms`)
+
+  start = Date.now()
+  const noisy = `${"line of output\n".repeat(400_000)}Command exited with code 2.\n`
+  const r = detectToolFailure({ status: "completed", tool: "bash", result: noisy })
+  assert.ok(r, "failure still detected at the tail")
+  assert.ok(Date.now() - start < 1000, `detect took ${Date.now() - start}ms`)
+  assert.ok(detectToolFailure({ status: "error", tool: "bash", error: { message: big } }).head.length > 0)
+})

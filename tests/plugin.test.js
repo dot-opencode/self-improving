@@ -1,5 +1,5 @@
 import assert from "node:assert/strict"
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { test } from "node:test"
@@ -209,8 +209,9 @@ test("backup spawn is deduped per directory while running", async () => {
     await tick()
     assert.equal(p.calls.length, 1)
     assert.equal(p.calls[0].cwd, fx.project)
-    assert.deepEqual(p.calls[0].args, ["backup"])
-    assert.match(p.calls[0].command, /bin\/learn$/)
+    assert.equal(p.calls[0].command, "bash")
+    assert.equal(p.calls[0].args[1], "backup")
+    assert.match(p.calls[0].args[0], /bin\/learn$/)
 
     await new Promise((resolve) => setTimeout(resolve, 80))
     p.emit({ type: "session.execution.succeeded", data: { sessionID: "ses_1" } })
@@ -735,6 +736,213 @@ test("setup works when ctx.command is missing", async () => {
   const p = await start(fx)
   try {
     assert.equal(typeof p.cleanup, "function")
+  } finally {
+    p.cleanup()
+    rmSync(fx.root, { recursive: true, force: true })
+  }
+})
+
+function logCtx(w) {
+  const logged = []
+  w.ctx.log = { error: (entry) => void logged.push(entry) }
+  return logged
+}
+
+test("/learn-check failure is logged unconditionally and reported to the session", async () => {
+  const fx = fixture()
+  const w = withCommands(fx)
+  const logged = logCtx(w)
+  const texts = []
+  let first = true
+  w.ctx.session.synthetic = async (input) => {
+    if (first) {
+      first = false
+      throw new Error("synthetic broke")
+    }
+    texts.push(input.text)
+  }
+  const cleanup = await plugin.setup(w.ctx, { spawn: fakeSpawn([]), storeRoot: fx.store })
+  try {
+    candidate(fx, "work", "a.b", "proposed")
+    await w.commands["learn-check"].execute({ sessionID: "ses_1", prompt: { text: "" } })
+    assert.ok(logged.some((e) => e.message === "learn-check failed" && /synthetic broke/.test(e.error)), JSON.stringify(logged))
+    assert.equal(texts.length, 1)
+    assert.match(texts[0], /\/learn-check failed: synthetic broke/)
+  } finally {
+    cleanup()
+    rmSync(fx.root, { recursive: true, force: true })
+  }
+})
+
+test("/learn-check and /learn-review never throw when synthetic/prompt are missing or throwing", async () => {
+  const fx = fixture()
+  candidate(fx, "work", "a.b", "proposed")
+  const w = withCommands(fx)
+  const logged = logCtx(w)
+  delete w.ctx.session.synthetic
+  delete w.ctx.session.prompt
+  const cleanup = await plugin.setup(w.ctx, { spawn: fakeSpawn([]), storeRoot: fx.store })
+  try {
+    await w.commands["learn-check"].execute({ sessionID: "ses_1" })
+    await w.commands["learn-review"].execute({ sessionID: "ses_1" })
+    assert.ok(logged.some((e) => e.message === "learn-check failed"))
+    assert.ok(logged.some((e) => e.message === "learn-review failed"))
+
+    // Everything throws, including the error report itself.
+    w.ctx.session.synthetic = async () => {
+      throw new Error("s")
+    }
+    w.ctx.session.prompt = async () => {
+      throw new Error("p")
+    }
+    await w.commands["learn-check"].execute({ sessionID: "ses_1" })
+    await w.commands["learn-review"].execute({ sessionID: "ses_1" })
+    assert.ok(logged.some((e) => e.message === "learn-review error report failed"), JSON.stringify(logged))
+  } finally {
+    cleanup()
+    rmSync(fx.root, { recursive: true, force: true })
+  }
+})
+
+test("/learn-review prompt failure posts a short error to the session", async () => {
+  const fx = fixture()
+  candidate(fx, "work", "a.b", "proposed")
+  const w = withCommands(fx)
+  const logged = logCtx(w)
+  w.ctx.session.prompt = async () => {
+    throw new Error("prompt broke")
+  }
+  const cleanup = await plugin.setup(w.ctx, { spawn: fakeSpawn([]), storeRoot: fx.store })
+  try {
+    await w.commands["learn-review"].execute({ sessionID: "ses_1", prompt: { text: "" } })
+    assert.ok(logged.some((e) => e.message === "learn-review failed"))
+    assert.match(w.synthetic[0].text, /\/learn-review failed: prompt broke/)
+  } finally {
+    cleanup()
+    rmSync(fx.root, { recursive: true, force: true })
+  }
+})
+
+test("/learn-check distinguishes missing store from store without candidates", async () => {
+  const fx = fixture({ learnings: false })
+  const p = await startCommands(fx)
+  try {
+    await p.commands["learn-check"].execute({ sessionID: "ses_1" })
+    assert.match(p.synthetic[0].text, /has no profiles with candidates yet/)
+    assert.doesNotMatch(p.synthetic[0].text, /no store at/)
+  } finally {
+    p.cleanup()
+  }
+  const missing = { ...fx, store: join(fx.root, "nope") }
+  const q = await startCommands(missing)
+  try {
+    await q.commands["learn-check"].execute({ sessionID: "ses_1" })
+    assert.match(q.synthetic[0].text, /^self-improving: no store at /)
+  } finally {
+    q.cleanup()
+    rmSync(fx.root, { recursive: true, force: true })
+  }
+})
+
+test("backup spawns via bash and logs the first spawn error once, unconditionally", async () => {
+  const fx = fixture()
+  const calls = []
+  const logged = []
+  const errSpawn = (command, args, options) => {
+    calls.push({ command, args })
+    const handlers = {}
+    setTimeout(() => handlers.error?.(new Error("spawn EACCES")), 5)
+    return { on: (event, fn) => void (handlers[event] = fn) }
+  }
+  const fake = fakeCtx(fx)
+  fake.ctx.log = { error: (entry) => void logged.push(entry) }
+  const cleanup = await plugin.setup(fake.ctx, { spawn: errSpawn, storeRoot: fx.store })
+  try {
+    fake.emit({ type: "session.execution.succeeded", data: { sessionID: "ses_1" } })
+    await tick()
+    fake.emit({ type: "session.execution.succeeded", data: { sessionID: "ses_1" } })
+    await tick()
+    assert.equal(calls.length, 2)
+    assert.equal(calls[0].command, "bash")
+    assert.match(calls[0].args[0], /bin\/learn$/)
+    assert.equal(calls[0].args[1], "backup")
+    const errs = logged.filter((e) => e.message === "backup spawn error")
+    assert.equal(errs.length, 1, JSON.stringify(logged))
+    assert.match(errs[0].error, /EACCES/)
+  } finally {
+    cleanup()
+    rmSync(fx.root, { recursive: true, force: true })
+  }
+})
+
+test("backup survives a synchronously throwing spawn", async () => {
+  const fx = fixture()
+  const logged = []
+  const fake = fakeCtx(fx)
+  fake.ctx.log = { error: (entry) => void logged.push(entry) }
+  const cleanup = await plugin.setup(fake.ctx, {
+    spawn: () => {
+      throw new Error("ENOENT")
+    },
+    storeRoot: fx.store,
+  })
+  try {
+    fake.emit({ type: "session.execution.succeeded", data: { sessionID: "ses_1" } })
+    await tick()
+    assert.ok(logged.some((e) => e.message === "backup spawn error" && /ENOENT/.test(e.error)), JSON.stringify(logged))
+  } finally {
+    cleanup()
+    rmSync(fx.root, { recursive: true, force: true })
+  }
+})
+
+test("context scan is cached: unchanged files are not re-read, changes invalidate", async () => {
+  const fx = fixture()
+  const inbox = join(fx.store, "work", "inbox")
+  const cands = join(fx.store, "work", "candidates")
+  mkdirSync(cands, { recursive: true })
+  const inboxFile = join(inbox, "2026-02-01.jsonl")
+  const candFile = join(cands, "test.a.md")
+  const candBody = (status) => `---\nstatus: ${status}\n---\nx\n`
+  writeFileSync(inboxFile, `{"ts":"2026-02-01T00:00:00Z"}\n`)
+  writeFileSync(candFile, candBody("proposed"))
+  writeFileSync(join(fx.store, "work", "INDEX.md"), "- [a.b](candidates/a.b.md) — correction ×1: d\n")
+  const fixed = new Date("2026-02-01T00:00:00Z")
+  for (const path of [inboxFile, candFile]) utimesSync(path, fixed, fixed)
+  const p = await start(fx)
+  const run = async () => {
+    const ev = { sessionID: "ses_1", system: [] }
+    await p.hooks["session:context"](ev)
+    return ev.system[0]?.text ?? ""
+  }
+  // Rewrite with same size and the same mtime: a re-read would change the result.
+  const sneak = (path, content) => {
+    writeFileSync(path, content)
+    utimesSync(path, fixed, fixed)
+  }
+  try {
+    const first = await run()
+    assert.ok(first.includes("Inbox: 1 unprocessed event."), first)
+    assert.ok(first.includes("(1): test.a"), first)
+
+    sneak(inboxFile, " ".repeat(29) + "\n")
+    sneak(candFile, candBody("rejected "))
+    sneak(candFile, candBody("proposed"))
+    assert.equal(await run(), first)
+
+    // Real changes (new size/mtime) invalidate.
+    writeFileSync(inboxFile, `{"ts":"2026-02-01T00:00:00Z"}\n{"ts":"2026-02-01T00:00:01Z"}\n`)
+    writeFileSync(candFile, candBody("candidate"))
+    const second = await run()
+    assert.ok(second.includes("Inbox: 2 unprocessed events."), second)
+    assert.ok(!second.includes("Proposed, waiting"), second)
+
+    // New files and removals are picked up.
+    writeFileSync(join(cands, "test.b.md"), candBody("proposed"))
+    rmSync(inboxFile)
+    const third = await run()
+    assert.ok(third.includes("(1): test.b"), third)
+    assert.ok(!third.includes("Inbox:"), third)
   } finally {
     p.cleanup()
     rmSync(fx.root, { recursive: true, force: true })

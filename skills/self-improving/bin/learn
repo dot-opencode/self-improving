@@ -74,8 +74,10 @@ die() { echo "learn: $*" >&2; exit 1; }
 warn() { echo "learn: $*" >&2; }
 
 canonical_path() {
-  local path="$1" dir target
+  local path="$1" dir target hops=0
   while [ -L "$path" ]; do
+    hops=$((hops + 1))
+    [ "$hops" -le 40 ] || { echo "learn: too many levels of symbolic links: $1" >&2; return 1; }
     dir="$(cd -P "$(dirname "$path")" && pwd -P)" || return 1
     target="$(readlink "$path")"
     case "$target" in /*) path="$target" ;; *) path="$dir/$target" ;; esac
@@ -597,7 +599,8 @@ cmd_ack() {
   done
   resolve_profile
   [ -n "$until_ts" ] || until_ts="$(now_utc)"
-  [[ "$until_ts" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2} ]] || die "invalid timestamp '$until_ts': use ISO-8601, e.g. 2026-09-30T12:00:00Z"
+  [[ "$until_ts" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] && until_ts="${until_ts}T00:00:00Z"
+  [[ "$until_ts" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}(:[0-9]{2}(\.[0-9]+)?)?(Z|[+-][0-9]{2}:?[0-9]{2})$ ]] || die "invalid timestamp '$until_ts': use ISO-8601 with a timezone, e.g. 2026-09-30T12:00:00Z"
   local tmp
   tmp="$(mk_tmp "$PDIR/inbox")"
   printf '%s\n' "$until_ts" > "$tmp"
@@ -1523,7 +1526,7 @@ dream_render() {   # dream_render <template> <store> <learn-bin> <home>
 ensure_store_excludes() {
   local p ex="$STORE_HOME/.git/info/exclude"
   mkdir -p "$STORE_HOME/.git/info"
-  for p in /.dream-last /.drafts/ /.dream.lock; do
+  for p in /.dream-last /.drafts/ /.dream.lock '.learn.*'; do
     if ! grep -qxF "$p" "$ex" 2>/dev/null; then
       if [ -s "$ex" ] && [ -n "$(tail -c 1 "$ex")" ]; then printf '\n' >> "$ex"; fi
       printf '%s\n' "$p" >> "$ex"
@@ -1836,6 +1839,14 @@ main() {
   if [ $# -gt 0 ]; then shift; fi
   # `--profile <p>` as the first argument addresses a store profile directly
   # (the dream agent runs in the store root, where there is no ./.learnings).
+  # Leading `--profile <p> <cmd>` / `--profile=<p> <cmd>` is also accepted.
+  case "$cmd" in
+    --profile=*) PROFILE_OVERRIDE="${cmd#--profile=}"; [ -n "$PROFILE_OVERRIDE" ] || die "--profile requires a value"
+      cmd="${1:-}"; if [ $# -gt 0 ]; then shift; fi ;;
+    --profile)
+      [ $# -ge 2 ] && [ -n "$1" ] || die "--profile requires a value"
+      PROFILE_OVERRIDE="$1"; shift; cmd="${1:-}"; if [ $# -gt 0 ]; then shift; fi ;;
+  esac
   case "$cmd" in
     inbox|ack|add|bump|propose|apply|reject|index|status|doctor|grep|prune)
       if [ "${1:-}" = "--profile" ]; then

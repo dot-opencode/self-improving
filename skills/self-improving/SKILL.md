@@ -1,6 +1,6 @@
 ---
 name: self-improving
-description: Turn repeated agent mistakes and user corrections into a durable behavior change (script, skill patch, new skill, or AGENTS.md suggestion). Use after a user correction ("нет, я про другое", "no, stop", "I said…"), on "запомни урок" / remember, on "разбери inbox" / "/learn", and at a natural pause (end of a task) when the `<self-improving>` block lists proposed candidates. Never mid-task.
+description: Turn repeated agent mistakes and user corrections into a durable behavior change (script, skill patch, new skill, or AGENTS.md suggestion). Use after a user correction ("нет, я про другое", "no, stop", "I said…"), on "запомни урок" / remember, on the chat phrase "разбери inbox" (or "/learn" typed as plain text, not a registered slash command), and at a natural pause (end of a task) when the `<self-improving>` block lists proposed candidates. Never mid-task.
 license: MIT
 ---
 
@@ -21,7 +21,7 @@ suggest `learn init <profile>` to the user, but never run it yourself.
 
 - The user corrected you ("нет", "не так", "я же просил", "no, stop", "I said…"): fix the behavior now, in the conversation. The plugin already recorded the correction and the nightly dream triages it. Do not record it yourself.
 - The user asks you to remember a lesson or states a standing rule ("запомни / всегда / никогда / always / never / remember"): record it yourself with `learn add|bump … --date <today>`.
-- The user says "разбери inbox" or "/learn": run the Triage section below.
+- The user says "разбери inbox" (or "/learn" as a chat phrase; it is not a registered slash command): run the Triage section below.
 - Your context contains `<self-improving>` with a `Proposed, waiting for the user's decision` line **and** you are at a natural pause (end of a task): offer the proposed candidates (see Start Packet / Proposal). Never mid-task.
 - The user runs `/learn-review` (plugin command; `/learn-check` only reports counts): run the review per the Start Packet / Proposal flow for the listed candidates, one at a time, using `learn --profile <profile> …`.
 - Never triage the inbox on your own initiative; that is dream's job.
@@ -103,16 +103,15 @@ Choose the narrowest owner that fixes the behavior:
 | A shell or tool default setting | config file | `config:<path>`, for example `~/.zshenv` |
 | An existing skill failed | patch that skill | wherever it lives |
 | Repeated procedure, 1 repo | new skill | `<repo>/.agents/skills` |
-| Repeats in ≥2 repos of a profile | new skill | `.agents-configs/common/<profile>/skills` |
+| Repeats in ≥2 repos of a profile | new skill | profile-bound skills dir (if you keep one) |
 | Profile/domain independent | new skill | `~/.agents/skills` |
 | Short rule, 1 repo | **suggest** edit to `<repo>/AGENTS.md` | repo |
 | Short rule, cross-repo | skill | common / global |
 
-The user's setup: skills live in `~/.agents/skills` (global), in
-`.agents-configs/common/<profile>/skills` (profile-bound; `config.sh` symlinks them
-into projects), and in `<repo>/.agents/skills` (repo-local). Derive the layer from
-the candidate's `projects:` and from whether each project's
-`.opencode -> …/opencode/<profile>` points at the same profile. Worked examples:
+Skill layers: `~/.agents/skills` (global), `<repo>/.agents/skills` (repo-local) and,
+if your setup keeps per-profile skill dirs, a profile-bound dir shared by that
+profile's projects. Derive the layer from the candidate's `projects:` and from
+whether those projects share the same profile. Worked examples:
 `references/owner-selection.md`.
 
 ## Start Packet / Proposal
@@ -123,7 +122,7 @@ Before touching any file, show the user and wait for approve:
 ## Proposal: <pattern-key> (seen=N, projects: a, b)
 - **Future behavior:** imperative, 1–3 lines.
 - **Owner:** script:<path> | skill:<name> | new-skill:<name> | agents:<repo> (suggestion) | config:<path> | hint:<id>
-- **Layer:** repo | <repo>/.agents/skills | common/<profile> | ~/.agents/skills
+- **Layer:** repo | <repo>/.agents/skills | profile-bound dir | ~/.agents/skills
 - **Write boundary:** exact files that will change (and nothing else).
 - **Change:** unified diff, or skeleton of the new skill (name, description, key rules).
 - **Stays local:** what remains in inbox/candidate only (raw wording, project details).
@@ -137,7 +136,7 @@ If the user rejects: `learn reject <key> --reason "…"`. If they ask for change
 After approve, change **exactly one owner**.
 
 - New skill → create it through the `writing-skills` skill. Keep it small; put only the behavior, not the evidence.
-- Patching a skill in `~/.agents/skills`: warn the user that `npx skills` may overwrite it later; prefer a fork under `.agents-configs/common/<profile>/skills`.
+- Patching a skill in `~/.agents/skills`: warn the user that `npx skills` may overwrite it later; prefer a fork in a profile-bound or repo-local skills directory.
 - `AGENTS.md` is never edited without approve, and only for the repo named in the proposal.
 - Record it: `learn apply <key> --owner <script:path|skill:name|new-skill:name|agents:repo|config:path|hint:id> --change-ref <commit|path>`.
 - Then run `learn backup`.
@@ -175,7 +174,7 @@ Never put profanity or personal phrasing into skills or rules. Markers are perso
 `learn` from PATH, otherwise `<this skill's directory>/bin/learn`.
 
 ```
-learn [--profile <p>] <command>      # --profile must be the FIRST argument (needed outside a project with .learnings)
+learn [--profile <p>] <command>      # --profile goes before the command or right after it (needed outside a project with .learnings)
 learn init <profile>                 # user-only; never run yourself
 learn status | doctor | index | grep <pattern>
 learn inbox [--limit N] [--since ts] [--kind k] [--tier t] [--all] [--json]

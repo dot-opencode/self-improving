@@ -374,6 +374,18 @@ run inbox
 expect_contains "inbox empty after ack" "(no events)"
 expect_not_contains "no trailer when no events" "ack: learn ack"
 expect_die "ack rejects bad timestamp" "invalid timestamp" ack --until yesterday
+expect_die "ack rejects timestamp without timezone" "invalid timestamp" ack --until 2026-09-30T12:00:00
+expect_ok "ack accepts offset timestamp" ack --until 2026-09-30T12:00:00+03:00
+expect_ok "ack date-only normalizes to UTC" ack --until 2026-09-30
+check "ack date-only stored as Z" test "$(cat "$PDIR/inbox/.ack")" = "2026-09-30T00:00:00Z"
+
+# --- leading / trailing --profile -----------------------------------------
+expect_ok "leading --profile <p> status" --profile work status
+expect_contains "leading --profile status output" "work"
+expect_ok "leading --profile=<p> status" --profile=work status
+expect_ok "trailing status --profile <p>" status --profile work
+expect_die "leading --profile without value" "--profile requires a value" --profile
+expect_die "leading --profile unknown profile" "no such profile" --profile nope status
 
 # --- prune ----------------------------------------------------------------
 LEARN_TODAY=2026-01-01 "$LEARN" add --key env.stale-thing --kind workflow --summary "old one-off" --evidence "old" >/dev/null 2>&1
@@ -464,6 +476,11 @@ run add --key build.after-backup --kind workflow --summary "post backup" --evide
 expect_ok "backup second commit" backup
 LAST="$(git -C "$STORE" log -1 --format=%s)"
 if [[ "$LAST" == "learn(work): +1 candidates, ~0 bumped, →0 applied"* ]]; then pass "backup counts new candidate"; else fail "backup counts new candidate" "$LAST"; fi
+: > "$PDIR/candidates/.learn.leftover"
+expect_ok "backup with stray temp file" backup
+check "temp file excluded from the store" test -z "$(git -C "$STORE" ls-files '*.learn.*')"
+check "temp file excluded in info/exclude" grep -qxF '.learn.*' "$STORE/.git/info/exclude"
+rm -f "$PDIR/candidates/.learn.leftover"
 expect_die "backup --push without remote dies" "no remote" backup --push
 
 # --- install-opencode -----------------------------------------------------

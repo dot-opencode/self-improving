@@ -49,7 +49,7 @@ test("template: policies mirror the primary agent's permissions", () => {
 test("template: deny-all first, then allows", () => {
   const perms = template.agents["learn-dream"].permissions;
   assert.deepEqual(perms[0], { action: "*", resource: "*", effect: "deny" });
-  for (const a of ["read", "glob", "grep", "external_directory", "webfetch", "websearch"]) {
+  for (const a of ["read", "glob", "grep", "external_directory"]) {
     assert.ok(idx(perms, a, "*") > 0, `${a} allowed`);
   }
   assert.equal(template.agents["learn-dream"].permissions.find((p) => p.action === "subagent").resource, "learn-dream-check");
@@ -84,6 +84,21 @@ test("template: edit only in the store, never .git or inbox", () => {
   for (const r of ["__STORE__/.git*", "__STORE__/*/inbox/*", ".git", ".git/*", "*/.git", "*/.git/*"]) {
     const i = perms.findIndex((p) => p.action === "edit" && p.resource === r && p.effect === "deny");
     assert.ok(i > allowStore, `edit deny ${r} after the store allow`);
+  }
+});
+
+test("template: no web access, hints.json/markers.json not editable", () => {
+  for (const name of ["learn-dream", "learn-dream-check"]) {
+    const perms = template.agents[name].permissions;
+    assert.ok(!perms.some((p) => /^(webfetch|websearch)$/.test(p.action) && p.effect === "allow"), `${name}: no web allow`);
+  }
+  assert.ok(!template.experimental.policies.some((p) => /^(webfetch|websearch):/.test(p.resource) && p.effect === "allow"));
+  const perms = template.agents["learn-dream"].permissions;
+  const allowStore = idx(perms, "edit", "__STORE__/*");
+  for (const f of ["hints.json", "markers.json"]) {
+    const i = perms.findIndex((p) => p.action === "edit" && p.resource === `__STORE__/${f}` && p.effect === "deny");
+    assert.ok(i > allowStore, `edit deny ${f} after the store allow`);
+    assert.ok(template.experimental.policies.some((p) => p.resource === `edit:__STORE__/${f}` && p.effect === "deny"));
   }
 });
 

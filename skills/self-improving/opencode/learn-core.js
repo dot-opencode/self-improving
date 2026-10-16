@@ -252,7 +252,14 @@ export function shouldCapture({ text, isFirstMessage, isSubagent, prevWasToolAct
   return true
 }
 
+// Pre-truncation bound: regexes never see more than REDACT_INPUT_FACTOR * max chars.
+const REDACT_INPUT_FACTOR = 50
+
 const REDACTIONS = [
+  // PEM private keys, including truncated ones with no END line (runs to end of input).
+  [/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g, "[redacted]"],
+  // Env-style assignments: AWS_SECRET_ACCESS_KEY=…, DB_PASSWORD="…", GH_TOKEN=…, STRIPE_KEY=…
+  [/\b[A-Z][A-Z0-9_]*_(?:SECRET_ACCESS_KEY|SECRET|TOKEN|PASSWORD|PASSWD|KEY)\s*=\s*(?:"[^"]*"|'[^']*'|\S+)/g, "[redacted]"],
   [/Bearer\s+\S+/g, "[redacted]"],
   [/sk-[A-Za-z0-9_-]{8,}/g, "[redacted]"],
   [/Basic\s+[A-Za-z0-9+/=]{8,}/g, "[redacted]"],
@@ -267,6 +274,8 @@ const REDACTIONS = [
 
 export function redact(text, max = 300) {
   let value = String(text ?? "")
+  const cap = Math.max(max, 1) * REDACT_INPUT_FACTOR
+  if (value.length > cap) value = value.slice(0, cap)
   for (const [re, replacement] of REDACTIONS) value = value.replace(re, replacement)
   value = value.replace(/\s+/g, " ").trim()
   if (value.length > max) value = `${value.slice(0, Math.max(0, max - 1))}…`
@@ -321,10 +330,33 @@ function numericExit(result) {
   return undefined
 }
 
+// Bound regex/split work on huge outputs: keep the head and the tail (the tail
+// holds the exit line / last traceback line).
+const RESULT_TEXT_CAP = 200_000
+
 function resultText(result) {
-  return typeof result === "string"
-    ? result
-    : [flatten(result?.content), flatten(result?.output), flatten(result?.metadata?.output)].filter(Boolean).join("\n")
+  const text =
+    typeof result === "string"
+      ? result
+      : [flatten(result?.content), flatten(result?.output), flatten(result?.metadata?.output)].filter(Boolean).join("\n")
+  if (text.length <= RESULT_TEXT_CAP) return text
+  const half = RESULT_TEXT_CAP / 2
+  return `${text.slice(0, half)}\n${text.slice(-half)}`
+}
+
+function messageText(message) {
+  if (typeof message === "string") return message
+  try {
+    const json = JSON.stringify(message)
+    if (typeof json === "string") return json
+  } catch {
+    // Circular or otherwise unserializable: fall through.
+  }
+  try {
+    return String(message)
+  } catch {
+    return "tool error"
+  }
 }
 
 export function detectToolFailure(ev) {
@@ -332,7 +364,7 @@ export function detectToolFailure(ev) {
   const tool = ev.tool
   if (ev.status === "error") {
     const head = ev.error?.message ?? (typeof ev.error === "string" ? ev.error : "tool error")
-    return { tool, head: String(head) }
+    return { tool, head: messageText(head) }
   }
   if (ev.status !== "completed") return undefined
   const name = String(tool ?? "").toLowerCase()

@@ -13,7 +13,7 @@ script, a skill patch, a new skill, or (as a suggestion only) an `AGENTS.md` lin
   boundary, diff, and proof. The plugin injects the list of `proposed` candidates
   into sessions; the `self-improving` skill presents them at a natural pause and
   applies one only after user approval. In-session triage of the inbox happens
-  only when you ask for it ("разбери inbox", `/learn`).
+  only when you ask for it (say "разбери inbox" or "/learn" in chat; these are plain chat phrases, not registered slash commands).
   The unattended dream run uses its own OpenCode database at
   `<store>/.git/learn-dream.db`, which holds the latest run only, so dream sessions
   never show up in OpenCode's session list. Inspect it with `sqlite3`.
@@ -40,9 +40,20 @@ learn install-opencode          # symlinks the plugin into ~/.config/opencode/pl
 cd <project> && learn init <profile>   # e.g. home | work
 ```
 
-`learn` is bundled at `skills/self-improving/bin/learn` (and `bin/learn` in this
-repo). Put it on `PATH` or call it by path. `learn init` is user-only; the agent
-never runs it.
+`npx skills add ... -g -a opencode` installs the skill to
+`~/.agents/skills/self-improving/` (symlinked into `~/.config/opencode/skills/`), so
+the CLI lands at `~/.agents/skills/self-improving/bin/learn`. It is not on `PATH`
+automatically; link it, e.g.:
+
+```bash
+mkdir -p ~/.local/bin
+ln -sf ~/.agents/skills/self-improving/bin/learn ~/.local/bin/learn
+export PATH="$HOME/.local/bin:$PATH"   # add to your shell profile
+```
+
+In a clone of this repo it is `skills/self-improving/bin/learn` (and `bin/learn`).
+Run `learn install-opencode` after putting it on `PATH`, or call it by full path.
+`learn init` is user-only; the agent never runs it.
 
 ## Storage layout
 

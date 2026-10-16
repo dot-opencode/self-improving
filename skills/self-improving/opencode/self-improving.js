@@ -1,6 +1,6 @@
 import { spawn as nodeSpawn } from "node:child_process"
 import { realpathSync, statSync } from "node:fs"
-import { appendFile, mkdir, open, readdir, readFile, readlink, realpath } from "node:fs/promises"
+import { appendFile, mkdir, open, readdir, readFile, readlink, realpath, stat } from "node:fs/promises"
 import { homedir } from "node:os"
 import { basename, dirname, join, resolve, sep } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -273,6 +273,11 @@ export default {
       }
     }
 
+    // Per-file caches keyed by path + mtime + size (+ ack for inbox counts): a model
+    // call with no store changes costs stat() calls only, no reads or opens.
+    const inboxCache = new Map()
+    const candidateCache = new Map()
+
     async function unackedCount(state) {
       const inbox = join(state.dir, "inbox")
       let ack = 0
@@ -296,25 +301,46 @@ export default {
         return 0
       }
       let count = 0
+      const seen = new Set()
       for (const name of files) {
+        const path = join(inbox, name)
+        seen.add(path)
+        let info
+        try {
+          info = await stat(path)
+        } catch {
+          inboxCache.delete(path)
+          continue
+        }
+        const cached = inboxCache.get(path)
+        if (cached && cached.mtimeMs === info.mtimeMs && cached.size === info.size && cached.ack === ack) {
+          count += cached.count
+          continue
+        }
         let content
         try {
-          content = await readFile(join(inbox, name), "utf8")
+          content = await readFile(path, "utf8")
         } catch {
           continue
         }
+        let fileCount = 0
         for (const line of content.split("\n")) {
           if (!line.trim()) continue
           try {
             const parsed = JSON.parse(line)
             // Arrival key: `ats` (set by backfills) when present, else `ts`.
             const key = Date.parse(parsed.ats || parsed.ts)
-            if (Number.isNaN(key) || key > ack) count += 1
+            if (Number.isNaN(key) || key > ack) fileCount += 1
           } catch {
             // Skip malformed lines.
           }
         }
+        inboxCache.set(path, { mtimeMs: info.mtimeMs, size: info.size, ack, count: fileCount })
+        count += fileCount
       }
+      // Drop entries for files of this inbox that no longer exist / are filtered out.
+      const prefix = join(inbox, "")
+      for (const path of inboxCache.keys()) if (path.startsWith(prefix) && !seen.has(path)) inboxCache.delete(path)
       return count
     }
 
@@ -325,21 +351,34 @@ export default {
         const dir = join(state.dir, "candidates")
         const names = (await readdir(dir)).filter((name) => name.endsWith(".md"))
         const keys = []
+        const seen = new Set()
         for (const name of names) {
+          const path = join(dir, name)
+          seen.add(path)
           let handle
           try {
-            handle = await open(join(dir, name), "r")
+            const info = await stat(path)
+            const cached = candidateCache.get(path)
+            if (cached && cached.mtimeMs === info.mtimeMs && cached.size === info.size) {
+              if (cached.proposed) keys.push(name.slice(0, -".md".length))
+              continue
+            }
+            handle = await open(path, "r")
             const buffer = Buffer.alloc(HEAD_BYTES)
             const { bytesRead } = await handle.read(buffer, 0, HEAD_BYTES, 0)
             const head = buffer.toString("utf8", 0, bytesRead).replace(/\r\n/g, "\n")
             const match = head.match(/^---\n([\s\S]*?)\n---(?:\n|$)/)
-            if (match && /^status:[ \t]*proposed[ \t]*$/m.test(match[1])) keys.push(name.slice(0, -".md".length))
+            const proposed = Boolean(match && /^status:[ \t]*proposed[ \t]*$/m.test(match[1]))
+            candidateCache.set(path, { mtimeMs: info.mtimeMs, size: info.size, proposed })
+            if (proposed) keys.push(name.slice(0, -".md".length))
           } catch {
             // Unreadable candidate: skip it.
           } finally {
             await handle?.close().catch(() => {})
           }
         }
+        const prefix = join(dir, "")
+        for (const path of candidateCache.keys()) if (path.startsWith(prefix) && !seen.has(path)) candidateCache.delete(path)
         return keys.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
       } catch {
         return []
@@ -373,13 +412,23 @@ export default {
       }
     }
 
+    // The first spawn failure is logged unconditionally (once per process); later ones only in debug.
+    let backupErrorLogged = false
+    function reportBackupError(error, directory) {
+      const extra = { error: String(error), directory, cli }
+      if (backupErrorLogged) return debug("backup spawn error", extra)
+      backupErrorLogged = true
+      log("backup spawn error", extra)
+    }
+
     function runBackup(directory) {
       return new Promise((done) => {
         try {
-          const child = spawn(cli, ["backup"], { cwd: directory, stdio: "ignore" })
+          // `cli` is a bash script: run it via bash so a lost exec bit doesn't break backups.
+          const child = spawn("bash", [cli, "backup"], { cwd: directory, stdio: "ignore" })
           if (!child || typeof child.on !== "function") return done()
           child.on("error", (error) => {
-            debug("backup spawn error", { error: String(error), directory })
+            reportBackupError(error, directory)
             done()
           })
           child.on("close", (code) => {
@@ -387,7 +436,7 @@ export default {
             done()
           })
         } catch (error) {
-          debug("backup spawn failed", { error: String(error), directory })
+          reportBackupError(error, directory)
           done()
         }
       })
@@ -442,13 +491,35 @@ export default {
       }
     }
 
+    // Command failures are never silent: log unconditionally and, when possible, tell the user.
+    async function commandFailed(name, input, error) {
+      log(`${name} failed`, { error: String(error) })
+      try {
+        if (typeof ctx.session?.synthetic !== "function") return
+        await ctx.session.synthetic({ sessionID: input?.sessionID, text: `self-improving: /${name} failed: ${String(error?.message ?? error).slice(0, 200)}` })
+      } catch (postError) {
+        log(`${name} error report failed`, { error: String(postError) })
+      }
+    }
+
     async function learnCheck(input) {
       try {
         const profiles = await scanProfiles()
         const total = profiles.reduce((sum, p) => sum + p.proposed.length, 0)
         const lines = []
-        if (!profiles.length) lines.push(`self-improving: no store at ${storeRoot}`)
-        else {
+        if (!profiles.length) {
+          let exists = false
+          try {
+            exists = (await stat(storeRoot)).isDirectory()
+          } catch {
+            // Missing store.
+          }
+          lines.push(
+            exists
+              ? `self-improving: store at ${storeRoot} has no profiles with candidates yet.`
+              : `self-improving: no store at ${storeRoot}`,
+          )
+        } else {
           lines.push(
             total
               ? `self-improving: ${total} proposal${total === 1 ? "" : "s"} waiting for review.`
@@ -462,7 +533,7 @@ export default {
         }
         await ctx.session.synthetic({ sessionID: input?.sessionID, text: lines.join("\n") })
       } catch (error) {
-        debug("learn-check failed", { error: String(error) })
+        await commandFailed("learn-check", input, error)
       }
     }
 
@@ -494,7 +565,7 @@ export default {
         ].join("\n")
         await ctx.session.prompt({ ...input?.prompt, sessionID: input?.sessionID, delivery: input?.delivery, text })
       } catch (error) {
-        debug("learn-review failed", { error: String(error) })
+        await commandFailed("learn-review", input, error)
       }
     }
 
