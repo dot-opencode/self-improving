@@ -35,7 +35,7 @@ script, a skill patch, a new skill, or (as a suggestion only) an `AGENTS.md` lin
 ## Install
 
 ```bash
-npx skills add kurbezz/opencode-self-improving -g -a opencode
+npx skills add dot-opencode/self-improving -g -a opencode
 learn install-opencode          # symlinks the plugin into ~/.config/opencode/plugins/
 cd <project> && learn init <profile>   # e.g. home | work
 ```
