@@ -410,6 +410,105 @@ export default {
       }
     }
 
+    // Scan every profile in the store; independent of the session's `.learnings` link.
+    async function scanProfiles() {
+      try {
+        const entries = await readdir(storeRoot, { withFileTypes: true })
+        const names = entries
+          .filter((entry) => (entry.isDirectory() || entry.isSymbolicLink()) && !entry.name.startsWith(".") && PROFILE_RE.test(entry.name))
+          .map((entry) => entry.name)
+          .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
+        const profiles = []
+        for (const name of names) {
+          try {
+            const dir = join(storeRoot, name)
+            const candidatesDir = join(dir, "candidates")
+            const files = (await readdir(candidatesDir)).filter((file) => file.endsWith(".md"))
+            const state = { dir }
+            profiles.push({
+              name,
+              candidatesDir,
+              proposed: await proposedKeys(state),
+              candidates: files.length,
+              inbox: await unackedCount(state),
+            })
+          } catch {
+            // Not a profile with candidates/: skip.
+          }
+        }
+        return profiles
+      } catch {
+        return []
+      }
+    }
+
+    async function learnCheck(input) {
+      try {
+        const profiles = await scanProfiles()
+        const total = profiles.reduce((sum, p) => sum + p.proposed.length, 0)
+        const lines = []
+        if (!profiles.length) lines.push(`self-improving: no store at ${storeRoot}`)
+        else {
+          lines.push(
+            total
+              ? `self-improving: ${total} proposal${total === 1 ? "" : "s"} waiting for review.`
+              : "self-improving: no proposals waiting for review.",
+          )
+          for (const p of profiles) {
+            const keys = p.proposed.length ? ` (${p.proposed.join(", ")})` : ""
+            lines.push(`- ${p.name}: proposed ${p.proposed.length}${keys}; candidates ${p.candidates}; inbox ${p.inbox} unprocessed`)
+          }
+          if (total) lines.push("Run /learn-review to review them.")
+        }
+        await ctx.session.synthetic({ sessionID: input?.sessionID, text: lines.join("\n") })
+      } catch (error) {
+        debug("learn-check failed", { error: String(error) })
+      }
+    }
+
+    async function learnReview(input) {
+      try {
+        const filter = typeof input?.prompt?.text === "string" ? input.prompt.text.trim() : ""
+        const profiles = await scanProfiles()
+        const items = []
+        for (const p of profiles) {
+          for (const key of p.proposed) {
+            if (filter && filter !== p.name && filter !== key) continue
+            items.push({ profile: p.name, key, path: join(p.candidatesDir, `${key}.md`) })
+          }
+        }
+        if (!items.length) {
+          const suffix = filter ? ` matching "${filter}"` : ""
+          await ctx.session.synthetic({ sessionID: input?.sessionID, text: `self-improving: nothing to review${suffix}.` })
+          return
+        }
+        const text = [
+          "Use the `self-improving` skill. Review these proposed candidates one at a time:",
+          "",
+          ...items.map((item) => `- ${item.profile}: ${item.key} — ${item.path}`),
+          "",
+          "For each: read the file and present its Start Packet / Proposal, then wait for my decision (approve / changes / reject) before moving to the next one.",
+          "Apply only after I approve.",
+          "Run CLI commands as `learn --profile <profile> …` (profile from the list above), because this project may have no .learnings symlink.",
+          "End each item with an explicit terminal state (applied | candidate(seen=N) | rejected | open-question | no-delta).",
+        ].join("\n")
+        await ctx.session.prompt({ ...input?.prompt, sessionID: input?.sessionID, delivery: input?.delivery, text })
+      } catch (error) {
+        debug("learn-review failed", { error: String(error) })
+      }
+    }
+
+    try {
+      if (typeof ctx.command?.transform === "function") {
+        await ctx.command.transform((editor) => {
+          editor.add({ name: "learn-check", description: "Check for self-improving proposals waiting for review", execute: learnCheck })
+          editor.add({ name: "learn-review", description: "Review self-improving proposals one by one", execute: learnReview })
+        })
+      }
+    } catch (error) {
+      log("command registration failed", { error: String(error) })
+    }
+
     try {
       await ctx.tool.hook("execute.after", onToolAfter)
       await ctx.session.hook("prompt", onPrompt)

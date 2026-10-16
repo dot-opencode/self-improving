@@ -610,3 +610,133 @@ test("unacked count uses ats (arrival key) when present, mixed with plain events
     rmSync(fx.root, { recursive: true, force: true })
   }
 })
+
+function withCommands(fx) {
+  const fake = fakeCtx(fx)
+  const commands = {}
+  const synthetic = []
+  const prompts = []
+  fake.ctx.command = { transform: async (fn) => fn({ add: (c) => void (commands[c.name] = c) }) }
+  fake.ctx.session.synthetic = async (input) => void synthetic.push(input)
+  fake.ctx.session.prompt = async (input) => void prompts.push(input)
+  return { ...fake, commands, synthetic, prompts }
+}
+
+function candidate(fx, profile, key, status) {
+  const dir = join(fx.store, profile, "candidates")
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(join(dir, `${key}.md`), `---\nkey: ${key}\nstatus: ${status}\n---\nbody\n`)
+}
+
+async function startCommands(fx) {
+  const w = withCommands(fx)
+  const cleanup = await plugin.setup(w.ctx, { spawn: fakeSpawn([]), storeRoot: fx.store })
+  return { ...w, cleanup }
+}
+
+test("registers /learn-check and /learn-review", async () => {
+  const fx = fixture()
+  const p = await startCommands(fx)
+  try {
+    assert.deepEqual(Object.keys(p.commands).sort(), ["learn-check", "learn-review"])
+    assert.ok(p.commands["learn-check"].description)
+    assert.ok(p.commands["learn-review"].description)
+  } finally {
+    p.cleanup()
+    rmSync(fx.root, { recursive: true, force: true })
+  }
+})
+
+test("/learn-check reports proposals across profiles without .learnings", async () => {
+  const fx = fixture({ learnings: false })
+  candidate(fx, "work", "a.b", "proposed")
+  candidate(fx, "work", "c.d", "proposed")
+  candidate(fx, "work", "e.f", "candidate")
+  candidate(fx, "home", "x.y", "candidate")
+  const p = await startCommands(fx)
+  try {
+    await p.commands["learn-check"].execute({ sessionID: "ses_1", prompt: { text: "" } })
+    assert.equal(p.synthetic.length, 1)
+    const text = p.synthetic[0].text
+    assert.match(text, /^self-improving: 2 proposals waiting for review\./)
+    assert.match(text, /- work: proposed 2 \(a\.b, c\.d\); candidates 3; inbox 0 unprocessed/)
+    assert.match(text, /- home: proposed 0; candidates 1; inbox 0 unprocessed/)
+    assert.ok(text.indexOf("- home") < text.indexOf("- work"))
+    assert.match(text, /Run \/learn-review/)
+    assert.equal(p.prompts.length, 0)
+  } finally {
+    p.cleanup()
+    rmSync(fx.root, { recursive: true, force: true })
+  }
+})
+
+test("/learn-check with no proposals", async () => {
+  const fx = fixture()
+  candidate(fx, "work", "a.b", "candidate")
+  const p = await startCommands(fx)
+  try {
+    await p.commands["learn-check"].execute({ sessionID: "ses_1", prompt: { text: "" } })
+    const text = p.synthetic[0].text
+    assert.match(text, /^self-improving: no proposals waiting for review\./)
+    assert.match(text, /- work: proposed 0; candidates 1/)
+    assert.doesNotMatch(text, /\/learn-review/)
+  } finally {
+    p.cleanup()
+    rmSync(fx.root, { recursive: true, force: true })
+  }
+})
+
+test("/learn-review prompts the model with keys, paths and --profile; arg filters", async () => {
+  const fx = fixture({ learnings: false })
+  candidate(fx, "work", "a.b", "proposed")
+  candidate(fx, "home", "c.d", "proposed")
+  const p = await startCommands(fx)
+  try {
+    await p.commands["learn-review"].execute({ sessionID: "ses_1", delivery: "immediate", prompt: { text: "  " } })
+    assert.equal(p.prompts.length, 1)
+    const call = p.prompts[0]
+    assert.equal(call.sessionID, "ses_1")
+    assert.equal(call.delivery, "immediate")
+    assert.match(call.text, /self-improving/)
+    assert.match(call.text, /work: a\.b — .*candidates[\\/]a\.b\.md/)
+    assert.match(call.text, /home: c\.d — /)
+    assert.match(call.text, /learn --profile/)
+
+    await p.commands["learn-review"].execute({ sessionID: "ses_1", prompt: { text: "home" } })
+    assert.doesNotMatch(p.prompts[1].text, /work: a\.b/)
+    assert.match(p.prompts[1].text, /home: c\.d/)
+
+    await p.commands["learn-review"].execute({ sessionID: "ses_1", prompt: { text: "a.b" } })
+    assert.match(p.prompts[2].text, /work: a\.b/)
+    assert.doesNotMatch(p.prompts[2].text, /home: c\.d/)
+  } finally {
+    p.cleanup()
+    rmSync(fx.root, { recursive: true, force: true })
+  }
+})
+
+test("/learn-review with nothing proposed uses synthetic only", async () => {
+  const fx = fixture()
+  candidate(fx, "work", "a.b", "candidate")
+  const p = await startCommands(fx)
+  try {
+    await p.commands["learn-review"].execute({ sessionID: "ses_1", prompt: { text: "" } })
+    assert.equal(p.prompts.length, 0)
+    assert.equal(p.synthetic.length, 1)
+    assert.match(p.synthetic[0].text, /nothing to review/)
+  } finally {
+    p.cleanup()
+    rmSync(fx.root, { recursive: true, force: true })
+  }
+})
+
+test("setup works when ctx.command is missing", async () => {
+  const fx = fixture()
+  const p = await start(fx)
+  try {
+    assert.equal(typeof p.cleanup, "function")
+  } finally {
+    p.cleanup()
+    rmSync(fx.root, { recursive: true, force: true })
+  }
+})

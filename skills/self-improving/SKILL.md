@@ -23,6 +23,7 @@ suggest `learn init <profile>` to the user, but never run it yourself.
 - The user asks you to remember a lesson or states a standing rule ("запомни / всегда / никогда / always / never / remember"): record it yourself with `learn add|bump … --date <today>`.
 - The user says "разбери inbox" or "/learn": run the Triage section below.
 - Your context contains `<self-improving>` with a `Proposed, waiting for the user's decision` line **and** you are at a natural pause (end of a task): offer the proposed candidates (see Start Packet / Proposal). Never mid-task.
+- The user runs `/learn-review` (plugin command; `/learn-check` only reports counts): run the review per the Start Packet / Proposal flow for the listed candidates, one at a time, using `learn --profile <profile> …`.
 - Never triage the inbox on your own initiative; that is dream's job.
 
 ## Never

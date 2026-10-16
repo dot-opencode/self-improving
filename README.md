@@ -78,6 +78,13 @@ Every triage ends in one explicit state: `applied | candidate(seen=N) | rejected
 open-question | no-delta`. `learn prune` moves `seen=1` candidates that are stale
 (default 90 days) to `rejected/` with `reason: stale`.
 
+## Slash commands
+
+The plugin registers two commands. They scan every profile in the store, so they work from any project, with or without a `.learnings` symlink.
+
+- `/learn-check`: posts a short summary of proposals (`status: proposed`) waiting for review, plus candidate and unprocessed-inbox counts per profile. No model call.
+- `/learn-review [profile|pattern-key]`: starts a one-by-one review of the proposed candidates (optionally filtered); you approve, request changes or reject each one.
+
 ## Markers
 
 Two files with the same schema; the plugin merges them (personal after default):
