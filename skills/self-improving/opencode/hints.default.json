@@ -52,7 +52,7 @@
         "bash"
       ],
       "match": "pathspec\\s+'(?:[^'\\n]*/)?\\.memory(?:/[^'\\n]*)?'\\s+is beyond a symbolic link",
-      "text": "Hint: .memory/project and other .memory levels are symlinks into a separate memory store, not files to stage in this project. Rebuild indexes with memory index and save the memory store with memory backup. Do not force-add .memory paths."
+      "text": "Hint: .memory/project and other .memory levels are symlinks into a separate memory store, not files to stage in this project. Do not stage or force-add .memory paths; save changes with that store's own tooling instead."
     },
     {
       "id": "head-zero-count",

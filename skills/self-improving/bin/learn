@@ -1649,6 +1649,7 @@ cmd_dream() {
   for bad in "$STORE_HOME" "$HOME" "$SCRIPT_PATH"; do
     case "$bad" in
       *"$quote"*|*"$bs"*|*"$nlchar"*) die "cannot run dream: path contains a quote, backslash or newline: $bad" ;;
+      *[\*\?\[\]\{\}]*) die "cannot run dream: path contains a glob character (* ? [ ] { }): $bad" ;;
     esac
   done
   config="$(<"$assets/opencode.json")"

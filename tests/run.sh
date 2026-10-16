@@ -605,10 +605,26 @@ expect_contains "print-config: store substituted" "edit:$DSTORE/*"
 expect_contains "print-config: learn bin substituted" "shell:$LEARN inbox*"
 expect_contains "print-config: home substituted" "read:$HOME/.ssh/*"
 expect_contains "print-config: learn-dream agent" '"learn-dream"'
+
 if command -v node >/dev/null 2>&1; then
   printf '%s\n' "$OUT" > "$TMP/dream-config.json"
   check "print-config is valid JSON" node -e 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"))' "$TMP/dream-config.json"
 fi
+
+# glob metacharacters in substituted paths would widen permission globs: refuse
+for gc in '*' '?' '[x]' '{a,b}'; do
+  OUT="$(HOME="$TMP/gl${gc}ob" "$LEARN" dream --print-config 2>&1)"; RC=$?
+  if [ "$RC" -ne 0 ] && [[ "$OUT" == *"path contains a glob character"* ]]; then pass "dream rejects glob char '$gc' in HOME"; else fail "dream rejects glob char '$gc' in HOME" "exit $RC: $OUT"; fi
+done
+
+# canonical_path: symlink cycle errors out (hop cap) instead of hanging
+mkdir -p "$TMP/cyc"
+ln -sfn "$TMP/cyc/b" "$TMP/cyc/a"; ln -sfn "$TMP/cyc/a" "$TMP/cyc/b"
+eval "$(awk '/^canonical_path\(\) \{/,/^\}/' "$LEARN")"
+OUT="$(canonical_path "$TMP/cyc/a" 2>&1)"; RC=$?
+if [ "$RC" -ne 0 ] && [[ "$OUT" == *"too many levels of symbolic links"* ]]; then pass "canonical_path: symlink cycle fails with hop cap"; else fail "canonical_path: symlink cycle" "exit $RC: $OUT"; fi
+# a cyclic --from is refused by the draft check (never reaches cleanup)
+expect_die "add --from symlink cycle errors" "cannot read draft file" add --key a.b --kind workflow --summary s --evidence e --from "$TMP/cyc/a"
 
 # dream without opencode on PATH
 NOOC_PATH="$TMP/emptybin:/usr/bin:/bin"

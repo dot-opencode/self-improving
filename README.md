@@ -41,9 +41,10 @@ cd <project> && learn init <profile>   # e.g. home | work
 ```
 
 `npx skills add ... -g -a opencode` installs the skill to
-`~/.agents/skills/self-improving/` (symlinked into `~/.config/opencode/skills/`), so
+`~/.agents/skills/self-improving/` (OpenCode reads that directory directly), so
 the CLI lands at `~/.agents/skills/self-improving/bin/learn`. It is not on `PATH`
-automatically; link it, e.g.:
+automatically. Check that it kept its executable bit (`ls -l`; if not,
+`chmod +x` it), then link it, e.g.:
 
 ```bash
 mkdir -p ~/.local/bin
