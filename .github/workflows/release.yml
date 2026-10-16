@@ -23,7 +23,7 @@ jobs:
       - name: Tag matches shim VERSION
         run: |
           tag_version="${GITHUB_REF_NAME#v}"
-          shim_version="$(sed -n 's/^VERSION="\(.*\)"$/\1/p' skills/self-improving/bin/learn-shim skills/self-improving/bin/learn 2>/dev/null | head -n1)"
+          shim_version="$(sed -n 's/^VERSION="\(.*\)"$/\1/p' skills/self-improving/bin/learn 2>/dev/null | head -n1)"
           if [ -n "$shim_version" ] && [ "$tag_version" != "$shim_version" ]; then
             echo "tag version ($tag_version) != shim VERSION ($shim_version)" >&2
             exit 1

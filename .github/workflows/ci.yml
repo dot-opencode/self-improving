@@ -28,4 +28,6 @@ jobs:
       - name: Rust tests
         run: cargo test
       - name: Node tests
-        run: node --test tests/
+        env:
+          LEARN_BIN_PATH: ${{ github.workspace }}/target/release/learn
+        run: node --test tests/*.test.js

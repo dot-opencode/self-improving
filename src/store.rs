@@ -92,7 +92,9 @@ impl Ctx {
             profile: String::new(),
             pdir: String::new(),
             skill_dir,
-            script_path: exe,
+            // The bootstrap shim exports its own canonical path: that is the
+            // command agents invoke (e.g. in the dream sandbox), not the cached binary.
+            script_path: env_nonempty("LEARN_CLI_PATH").unwrap_or(exe),
             doc_problems: 0,
         }
     }

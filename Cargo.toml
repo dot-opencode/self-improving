@@ -1,6 +1,6 @@
 [package]
 name = "learn"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Behavior-learnings CLI (Rust port of skills/self-improving/bin/learn)"
 license = "MIT"

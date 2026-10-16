@@ -1,4 +1,4 @@
-//! `learn`: Rust port of skills/self-improving/bin/learn (bash, v0.1.0).
+//! `learn`: the self-improving CLI (formerly a bash script).
 //!
 //! Locating assets: the default markers/hints JSON, the OpenCode plugin and the
 //! dream config live in the skill directory (skills/self-improving). It is

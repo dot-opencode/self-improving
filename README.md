@@ -1,6 +1,6 @@
 # opencode-self-improving
 
-A skill, an OpenCode plugin, and a small Bash CLI (`learn`) that turn repeated
+A skill, an OpenCode plugin, and a small Rust CLI (`learn`) that turn repeated
 agent mistakes and user corrections into a **durable behavior change** — a
 script, a skill patch, a new skill, or (as a suggestion only) an `AGENTS.md` line.
 
@@ -28,7 +28,7 @@ script, a skill patch, a new skill, or (as a suggestion only) an `AGENTS.md` lin
   not context. Facts found during triage are handed off to agent-memory.
 - **[zhaono1/agent-playbook](https://github.com/zhaono1/agent-playbook) `self-improving-agent`**
   uses a JSON state machine and an external evals CLI. This project has neither:
-  markdown files and Bash, in the conventions of `kurbezz/memory`. It borrows the
+  markdown files and a small CLI, in the conventions of `kurbezz/memory`. It borrows the
   Start Packet (owner/proof/write boundary before edits), explicit terminal states,
   the narrow → wide owner hierarchy, and "repetition ≠ truth".
 
@@ -51,6 +51,11 @@ mkdir -p ~/.local/bin
 ln -sf ~/.agents/skills/self-improving/bin/learn ~/.local/bin/learn
 export PATH="$HOME/.local/bin:$PATH"   # add to your shell profile
 ```
+
+`bin/learn` is a small POSIX sh bootstrap: on first run it downloads the Rust binary
+for your platform from the matching GitHub Release, checks its sha256, and caches it
+as `bin/.learn-<version>` (or under `~/.cache/self-improving/` if the skill dir is
+read-only). Set `LEARN_BIN_PATH` to use a locally built binary instead.
 
 In a clone of this repo it is `skills/self-improving/bin/learn` (and `bin/learn`).
 Run `learn install-opencode` after putting it on `PATH`, or call it by full path.
@@ -125,7 +130,7 @@ agent action and for messages < 200 chars.
 
 ## Limitations
 
-- macOS and Linux only; requires Bash, `git`, `grep`, `awk`, `readlink`, Node ≥ 22 (plugin and `markers test`).
+- macOS and Linux (x86_64, arm64) only; the CLI requires `git`, plus `curl` or `wget` for the first download. Node ≥ 22 is needed only for the OpenCode plugin.
 - Symlinks are absolute; moving `~/.agent-learnings` breaks project `.learnings` links (`learn doctor` reports it).
 - Targets the OpenCode V2 plugin API, which is in beta: hook names and the shape of `execute.after` events may change. Run with `SELF_IMPROVING_DEBUG=1` to log event types to stderr. The plugin never throws.
 - The store assumes a single writer for git backup; concurrent sessions may race on commits.
@@ -134,10 +139,12 @@ agent action and for messages < 200 chars.
 ## Development
 
 ```bash
-npm test     # bash tests/run.sh && node --test tests/
+npm test     # cargo test && node --test tests/*.test.js
 ```
 
-No npm dependencies; `node:test` only.
+The CLI is a Rust crate at the repo root (`src/`, `tests/*.rs`); the plugin has no npm
+dependencies (`node:test` only). Releases: bump `version` in `Cargo.toml` and `VERSION`
+in `skills/self-improving/bin/learn`, then push a `v<version>` tag.
 
 ## License
 
