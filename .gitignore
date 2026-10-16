@@ -1,3 +1,5 @@
 node_modules
 .learnings
 docs/superpowers/
+skills/self-improving/bin/.learn-*
+/target

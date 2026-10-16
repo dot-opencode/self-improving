@@ -1,0 +1,98 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - name: Tag matches Cargo.toml version
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          cargo_version="$(awk -F'"' '/^version[[:space:]]*=/ {print $2; exit}' Cargo.toml)"
+          if [ "$tag_version" != "$cargo_version" ]; then
+            echo "tag version ($tag_version) != Cargo.toml version ($cargo_version)" >&2
+            exit 1
+          fi
+      - name: Tag matches shim VERSION
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          shim_version="$(sed -n 's/^VERSION="\(.*\)"$/\1/p' skills/self-improving/bin/learn-shim skills/self-improving/bin/learn 2>/dev/null | head -n1)"
+          if [ -n "$shim_version" ] && [ "$tag_version" != "$shim_version" ]; then
+            echo "tag version ($tag_version) != shim VERSION ($shim_version)" >&2
+            exit 1
+          fi
+
+  build:
+    needs: verify
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            cross: false
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
+            cross: false
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            cross: true
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            cross: true
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install cross
+        if: matrix.cross
+        uses: taiki-e/install-action@v2.49.17
+        with:
+          tool: cross
+      - name: Build (cross)
+        if: matrix.cross
+        run: cross build --release --locked --target ${{ matrix.target }}
+      - name: Build (native)
+        if: ${{ !matrix.cross }}
+        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Package
+        run: |
+          mkdir -p dist
+          name="learn-${{ matrix.target }}.tar.gz"
+          tar -C "target/${{ matrix.target }}/release" -czf "dist/$name" learn
+          cd dist
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$name" > "$name.sha256"
+          else
+            shasum -a 256 "$name" > "$name.sha256"
+          fi
+      - uses: actions/upload-artifact@v4.6.2
+        with:
+          name: learn-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4.3.0
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2.2.2
+        with:
+          files: dist/*
+          generate_release_notes: true

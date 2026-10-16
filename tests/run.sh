@@ -3,7 +3,7 @@
 set -uo pipefail
 
 ROOT="$(cd -P "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
-LEARN="$ROOT/skills/self-improving/bin/learn"
+LEARN="${LEARN_BIN:-$ROOT/skills/self-improving/bin/learn}"
 
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/learn-test.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
@@ -632,9 +632,13 @@ done
 # canonical_path: symlink cycle errors out (hop cap) instead of hanging
 mkdir -p "$TMP/cyc"
 ln -sfn "$TMP/cyc/b" "$TMP/cyc/a"; ln -sfn "$TMP/cyc/a" "$TMP/cyc/b"
-eval "$(awk '/^canonical_path\(\) \{/,/^\}/' "$LEARN")"
-OUT="$(canonical_path "$TMP/cyc/a" 2>&1)"; RC=$?
-if [ "$RC" -ne 0 ] && [[ "$OUT" == *"too many levels of symbolic links"* ]]; then pass "canonical_path: symlink cycle fails with hop cap"; else fail "canonical_path: symlink cycle" "exit $RC: $OUT"; fi
+if [ -z "${LEARN_BIN:-}" ]; then   # bash-only: extracts the function from the script source
+  eval "$(awk '/^canonical_path\(\) \{/,/^\}/' "$LEARN")"
+  OUT="$(canonical_path "$TMP/cyc/a" 2>&1)"; RC=$?
+  if [ "$RC" -ne 0 ] && [[ "$OUT" == *"too many levels of symbolic links"* ]]; then pass "canonical_path: symlink cycle fails with hop cap"; else fail "canonical_path: symlink cycle" "exit $RC: $OUT"; fi
+else
+  echo "SKIP: canonical_path function extraction (binary build; covered by the --from cycle check below)"
+fi
 # a cyclic --from is refused by the draft check (never reaches cleanup)
 expect_die "add --from symlink cycle errors" "cannot read draft file" add --key a.b --kind workflow --summary s --evidence e --from "$TMP/cyc/a"
 

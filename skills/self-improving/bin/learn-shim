@@ -1,0 +1,87 @@
+#!/bin/sh
+# Bootstrap for the `learn` binary: locates or downloads the pinned release, then execs it.
+VERSION="0.1.0"
+REPO="dot-opencode/self-improving"
+
+say() { printf 'learn: %s\n' "$*" >&2; }
+die() { say "$*"; exit 1; }
+
+# Resolve own canonical path (follow symlinks).
+self="$0"
+while [ -L "$self" ]; do
+  link="$(readlink "$self")" || die "cannot read symlink $self"
+  case "$link" in
+    /*) self="$link" ;;
+    *) self="$(dirname "$self")/$link" ;;
+  esac
+done
+BIN_DIR="$(cd "$(dirname "$self")" >/dev/null 2>&1 && pwd -P)" || die "cannot resolve script directory"
+SKILL_DIR="$(dirname "$BIN_DIR")"
+LEARN_SKILL_DIR="$SKILL_DIR"
+export LEARN_SKILL_DIR
+
+if [ -n "${LEARN_BIN_PATH:-}" ]; then
+  [ -x "$LEARN_BIN_PATH" ] || die "LEARN_BIN_PATH is not executable: $LEARN_BIN_PATH"
+  exec "$LEARN_BIN_PATH" "$@"
+fi
+
+local_bin="$BIN_DIR/.learn-$VERSION"
+cache_bin="${XDG_CACHE_HOME:-${HOME:-/tmp}/.cache}/self-improving/learn-$VERSION"
+
+if [ -x "$local_bin" ]; then exec "$local_bin" "$@"; fi
+if [ -x "$cache_bin" ]; then exec "$cache_bin" "$@"; fi
+
+# Detect target.
+os="$(uname -s)"; arch="$(uname -m)"
+case "$os/$arch" in
+  Darwin/arm64|Darwin/aarch64) target="aarch64-apple-darwin" ;;
+  Darwin/x86_64) target="x86_64-apple-darwin" ;;
+  Linux/x86_64|Linux/amd64) target="x86_64-unknown-linux-musl" ;;
+  Linux/aarch64|Linux/arm64) target="aarch64-unknown-linux-musl" ;;
+  *) die "unsupported platform: $os/$arch (supported: macOS and Linux on x86_64/aarch64)" ;;
+esac
+
+fetch() { # url dest
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL --retry 2 -o "$2" "$1"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -q -O "$2" "$1"
+  else
+    die "need curl or wget to download the learn binary"
+  fi
+}
+
+sha_of() {
+  if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | cut -d' ' -f1
+  elif command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1
+  else die "need shasum or sha256sum to verify the download"
+  fi
+}
+
+# Choose destination.
+dest="$local_bin"
+if ! { [ -w "$BIN_DIR" ]; }; then
+  dest="$cache_bin"
+  mkdir -p "$(dirname "$dest")" 2>/dev/null || die "cannot create $(dirname "$dest")"
+fi
+
+tmp="$(mktemp -d "$(dirname "$dest")/.learn-dl.XXXXXX" 2>/dev/null)" || die "cannot create temp dir in $(dirname "$dest")"
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+
+asset="learn-$target.tar.gz"
+url="https://github.com/$REPO/releases/download/v$VERSION/$asset"
+say "downloading $asset (v$VERSION)"
+fetch "$url" "$tmp/$asset" || die "download failed: $url"
+fetch "$url.sha256" "$tmp/$asset.sha256" || die "download failed: $url.sha256"
+
+expected="$(cut -d' ' -f1 "$tmp/$asset.sha256" | head -n1)"
+actual="$(sha_of "$tmp/$asset")"
+[ -n "$expected" ] && [ "$expected" = "$actual" ] || die "sha256 mismatch for $asset (expected $expected, got $actual)"
+
+tar -xzf "$tmp/$asset" -C "$tmp" learn || die "failed to extract $asset"
+chmod +x "$tmp/learn"
+mv -f "$tmp/learn" "$dest" || die "failed to install $dest"
+trap - EXIT HUP INT TERM
+rm -rf "$tmp"
+
+exec "$dest" "$@"

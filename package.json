@@ -7,7 +7,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "test": "bash tests/run.sh && node --test tests/"
+    "test": "cargo test && node --test tests/"
   },
   "license": "MIT"
 }
