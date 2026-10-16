@@ -225,6 +225,18 @@ check "flag overrides draft summary" test "$(fmval "$T3" description)" = "from f
 check "flag overrides draft kind" test "$(fmval "$T3" kind)" = "correction"
 check "draft first match per field wins" grep -q 'proj-a: from draft evidence$' "$T3"
 
+# LEARN_DREAM=1 (set by `learn dream`): --from only from $STORE_HOME/.drafts/
+printf 'key: git.dream-outside\nkind: workflow\nsummary: s\nevidence: e\n' > "$TMP/dream-outside.md"
+OUT="$(LEARN_DREAM=1 AGENT_LEARNINGS_HOME="$STORE" "$LEARN" add --profile work --from "$TMP/dream-outside.md" 2>&1)"; RC=$?
+if [ "$RC" -ne 0 ] && [[ "$OUT" == *"must point into"* ]] && [ ! -e "$PDIR/candidates/git.dream-outside.md" ]; then pass "dream: --from outside .drafts refused"; else fail "dream: --from outside .drafts" "exit $RC: $OUT"; fi
+ln -sf "$TMP/dream-outside.md" "$STORE/.drafts/escape.md"
+OUT="$(LEARN_DREAM=1 AGENT_LEARNINGS_HOME="$STORE" "$LEARN" add --profile work --from "$STORE/.drafts/escape.md" 2>&1)"; RC=$?
+if [ "$RC" -ne 0 ] && [[ "$OUT" == *"must point into"* ]]; then pass "dream: symlink in .drafts pointing outside refused"; else fail "dream: .drafts symlink escape" "exit $RC: $OUT"; fi
+rm -f "$STORE/.drafts/escape.md"
+cp "$TMP/dream-outside.md" "$STORE/.drafts/dream-in.md"
+OUT="$( cd "$STORE" && LEARN_DREAM=1 AGENT_LEARNINGS_HOME="$STORE" "$LEARN" add --profile work --from .drafts/dream-in.md 2>&1)"; RC=$?
+if [ "$RC" -eq 0 ] && [ -f "$PDIR/candidates/git.dream-outside.md" ]; then pass "dream: --from .drafts/ relative accepted"; else fail "dream: --from .drafts/ accepted" "exit $RC: $OUT"; fi
+
 expect_die "add --from missing file dies" "cannot read draft" add --from "$TMP/nope.md"
 expect_die "bump --from missing file dies" "cannot read draft" bump --from "$TMP/nope.md"
 expect_die "reject --from missing file dies" "cannot read draft" reject --from "$TMP/nope.md"
@@ -645,6 +657,7 @@ cat > "$STUBBIN/opencode" <<'EOF'
 {
   printf 'cwd=%s\n' "$(pwd -P)"
   printf 'home=%s\n' "$AGENT_LEARNINGS_HOME"
+  printf 'learn_dream=%s\n' "${LEARN_DREAM:-}"
   printf 'args=%s\n' "$*"
   printf 'config=%s\n' "$OPENCODE_CONFIG_CONTENT"
   printf 'db=%s\n' "$OPENCODE_DB"
@@ -705,6 +718,7 @@ check "store exclude lists .drafts/" grep -qxF '/.drafts/' "$DSTORE/.git/info/ex
 check ".dream-last == HEAD" test "$(cat "$DSTORE/.dream-last")" = "$(git -C "$DSTORE" rev-parse HEAD)"
 check "stub ran in store root" grep -q "^cwd=$DSTORE$" "$STUB_LOG"
 check "stub got pinned AGENT_LEARNINGS_HOME" grep -q "^home=$DSTORE$" "$STUB_LOG"
+check "stub got LEARN_DREAM=1" grep -qx "learn_dream=1" "$STUB_LOG"
 check "stub got --standalone --agent learn-dream --model" grep -q '^args=run --standalone --agent learn-dream --model prov/model-x ' "$STUB_LOG"
 check "stub config has no placeholders" bash -c '! grep -q "__STORE__\|__LEARN_BIN__\|__HOME__" "$1"' _ "$STUB_LOG"
 check "prompt reached the stub" grep -q "Goal: consolidate the store" "$STUB_LOG"

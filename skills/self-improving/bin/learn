@@ -629,6 +629,17 @@ project_listed() {   # project_listed <list "[a, b]"> <project>
 # everything after the first ": "). Keeps free text out of the shell command line.
 draft_load() {   # draft_load <file>: die unless it is a readable regular file
   [ -f "$1" ] && [ -r "$1" ] || die "cannot read draft file: $1"
+  # Inside `learn dream` (LEARN_DREAM=1, set by cmd_dream) drafts must live in
+  # $STORE_HOME/.drafts/: the CLI runs outside the sandbox, so --from must not
+  # become a way to read files the dream agent itself may not read.
+  if [ "${LEARN_DREAM:-}" = 1 ]; then
+    local real
+    real="$(canonical_path "$1" 2>/dev/null)" || die "cannot read draft file: $1"
+    case "$real" in
+      "$STORE_HOME/.drafts/"*) ;;
+      *) die "inside dream, --from must point into $STORE_HOME/.drafts/: $1" ;;
+    esac
+  fi
 }
 
 draft_fill() {   # draft_fill <file> <var> <field>: set <var> from the draft when it is empty
@@ -1702,7 +1713,7 @@ cmd_dream() {
   rm -f "$db" "$db-wal" "$db-shm"
   outfile="$(mktemp "${TMPDIR:-/tmp}/learn-dream.XXXXXX")" || die "cannot create temporary file"
   set +e
-  (cd "$STORE_HOME" && AGENT_LEARNINGS_HOME="$STORE_HOME" OPENCODE_CONFIG_CONTENT="$config" OPENCODE_DB="$db" \
+  (cd "$STORE_HOME" && LEARN_DREAM=1 AGENT_LEARNINGS_HOME="$STORE_HOME" OPENCODE_CONFIG_CONTENT="$config" OPENCODE_DB="$db" \
     opencode run --standalone --agent learn-dream \
     ${model:+--model "$model"} "$prompt") | tee "$outfile"
   rc=${PIPESTATUS[0]}
