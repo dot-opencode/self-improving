@@ -96,3 +96,13 @@ jobs:
         with:
           files: dist/*
           generate_release_notes: true
+
+  publish-branch:
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Move release branch to the tagged commit
+        run: git push origin "+$GITHUB_SHA:refs/heads/release"

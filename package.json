@@ -1,8 +1,17 @@
 {
   "name": "opencode-self-improving",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "type": "module",
+  "exports": {
+    ".": "./skills/self-improving/opencode/self-improving.js"
+  },
+  "files": [
+    "skills/",
+    "bin/",
+    "README.md",
+    "LICENSE"
+  ],
   "engines": {
     "node": ">=22"
   },

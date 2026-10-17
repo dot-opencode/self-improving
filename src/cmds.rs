@@ -1471,6 +1471,9 @@ pub fn cmd_install_opencode(ctx: &mut Ctx, args: &[String]) {
     if !args.is_empty() {
         die("usage: learn install-opencode");
     }
+    eprintln!(
+        "learn: install-opencode is deprecated; prefer `opencode plugin add github:dot-opencode/self-improving#release`"
+    );
     let source = format!("{}/self-improving.js", ctx.opencode_dir());
     if !is_file(&source) {
         die(&format!("OpenCode plugin not found at {source}"));

@@ -139,7 +139,9 @@ fn backup_commits_and_counts() {
 fn install_opencode() {
     let e = Env::new();
     e.init_work();
-    e.run(&["install-opencode"]).ok("install-opencode");
+    e.run(&["install-opencode"])
+        .ok("install-opencode")
+        .has("prints deprecation note", "opencode plugin add");
     let link = e.home.join(".config/opencode/plugins/self-improving.js");
     check(
         "plugin symlink created",

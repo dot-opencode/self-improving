@@ -948,3 +948,94 @@ test("context scan is cached: unchanged files are not re-read, changes invalidat
     rmSync(fx.root, { recursive: true, force: true })
   }
 })
+
+function skillFile(root, description = "Test desc") {
+  const path = join(root, "SKILL.md")
+  writeFileSync(path, `---\nname: self-improving\ndescription: ${description}\n---\n\n# Body\ntext\n`)
+  return path
+}
+
+function skillCtx(fx, { existing = false, reg = { disposed: 0 } } = {}) {
+  const fake = fakeCtx(fx)
+  const added = []
+  fake.ctx.skill = {
+    transform: async (fn) => {
+      fn({ get: (id) => (existing && id === "self-improving" ? {} : undefined), add: (info) => void added.push(info) })
+      return { dispose: () => void (reg.disposed += 1) }
+    },
+  }
+  return { ...fake, added, reg }
+}
+
+test("registers the bundled skill via ctx.skill.transform and disposes it", async () => {
+  const fx = fixture()
+  const w = skillCtx(fx)
+  const path = skillFile(fx.root)
+  const cleanup = await plugin.setup(w.ctx, { spawn: fakeSpawn([]), storeRoot: fx.store, skillPath: path })
+  try {
+    assert.equal(w.added.length, 1)
+    assert.deepEqual(w.added[0], { id: "self-improving", name: "self-improving", description: "Test desc", path, content: "# Body\ntext" })
+  } finally {
+    cleanup()
+    assert.equal(w.reg.disposed, 1)
+    rmSync(fx.root, { recursive: true, force: true })
+  }
+})
+
+test("bundled SKILL.md registers with real frontmatter stripped", async () => {
+  const fx = fixture()
+  const w = skillCtx(fx)
+  const cleanup = await plugin.setup(w.ctx, { spawn: fakeSpawn([]), storeRoot: fx.store })
+  try {
+    assert.equal(w.added.length, 1)
+    assert.ok(w.added[0].description.length > 10)
+    assert.ok(!w.added[0].content.startsWith("---"))
+    assert.ok(w.added[0].content.startsWith("# Self-Improving"))
+  } finally {
+    cleanup()
+    rmSync(fx.root, { recursive: true, force: true })
+  }
+})
+
+test("skips skill registration when self-improving already exists", async () => {
+  const fx = fixture()
+  const w = skillCtx(fx, { existing: true })
+  const cleanup = await plugin.setup(w.ctx, { spawn: fakeSpawn([]), storeRoot: fx.store, skillPath: skillFile(fx.root) })
+  try {
+    assert.equal(w.added.length, 0)
+  } finally {
+    cleanup()
+    rmSync(fx.root, { recursive: true, force: true })
+  }
+})
+
+test("skill registration failures never throw", async () => {
+  const fx = fixture()
+  const w = fakeCtx(fx)
+  w.ctx.skill = { transform: async () => { throw new Error("boom") } }
+  const cleanup = await plugin.setup(w.ctx, { spawn: fakeSpawn([]), storeRoot: fx.store, skillPath: skillFile(fx.root) })
+  cleanup()
+  const w2 = skillCtx(fx)
+  const cleanup2 = await plugin.setup(w2.ctx, { spawn: fakeSpawn([]), storeRoot: fx.store, skillPath: join(fx.root, "missing.md") })
+  cleanup2()
+  assert.equal(w2.added.length, 0)
+  rmSync(fx.root, { recursive: true, force: true })
+})
+
+test("injection and /learn-review name the absolute CLI path", async () => {
+  const fx = fixture()
+  writeFileSync(join(fx.store, "work", "INDEX.md"), "# Index\n- [a.b](candidates/a.b.md) — correction ×2: x\n")
+  const w = withCommands(fx)
+  const cleanup = await plugin.setup(w.ctx, { spawn: fakeSpawn([]), storeRoot: fx.store, learnCli: "/abs/bin/learn" })
+  try {
+    candidate(fx, "work", "a.b", "proposed")
+    await w.commands["learn-review"].execute({ sessionID: "ses_1", prompt: { text: "" } })
+    assert.match(w.prompts[0].text, /\/abs\/bin\/learn --profile/)
+    const ev = { sessionID: "ses_1", system: [] }
+    await w.hooks["session:context"](ev)
+    assert.match(ev.system[0].text, /run it as `\/abs\/bin\/learn`/)
+  } finally {
+    cleanup()
+    rmSync(fx.root, { recursive: true, force: true })
+  }
+})

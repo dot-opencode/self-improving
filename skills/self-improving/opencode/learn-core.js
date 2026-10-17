@@ -397,13 +397,13 @@ export function indexLines(indexText) {
 
 const PROPOSED_LIST_CAP = 10
 
-export function buildInjection(indexText, unackedCount = 0, proposedKeys = []) {
+export function buildInjection(indexText, unackedCount = 0, proposedKeys = [], cliPath = undefined) {
   const lines = indexLines(indexText)
   const count = Number(unackedCount) || 0
   const proposed = Array.isArray(proposedKeys) ? proposedKeys.filter((key) => typeof key === "string" && key) : []
   if (lines.length === 0 && count === 0) return undefined
 
-  const head = `${OPEN}\nBehavior learnings for this project live in ./.learnings (managed by the \`learn\` CLI).`
+  const head = `${OPEN}\nBehavior learnings for this project live in ./.learnings (managed by the \`learn\` CLI${cliPath ? `; run it as \`${cliPath}\`, it is not on PATH` : ""}).`
   const tailLines = []
   if (proposed.length > 0) {
     const shown = proposed.slice(0, PROPOSED_LIST_CAP).join(", ")

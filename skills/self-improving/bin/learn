@@ -1,6 +1,6 @@
 #!/bin/sh
 # Bootstrap for the `learn` binary: locates or downloads the pinned release, then execs it.
-VERSION="0.1.1"
+VERSION="0.1.2"
 REPO="dot-opencode/self-improving"
 
 say() { printf 'learn: %s\n' "$*" >&2; }

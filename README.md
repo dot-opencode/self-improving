@@ -35,9 +35,34 @@ script, a skill patch, a new skill, or (as a suggestion only) an `AGENTS.md` lin
 ## Install
 
 ```bash
-npx skills add dot-opencode/self-improving -g -a opencode
-learn install-opencode          # symlinks the plugin into ~/.config/opencode/plugins/
+opencode plugin add github:dot-opencode/self-improving#release
 cd <project> && learn init <profile>   # e.g. home | work
+```
+
+The `release` branch moves only after a GitHub Release (and its binaries) is
+published, so you see updates on releases only. The plugin registers the bundled
+`self-improving` skill itself (unless a skill with that name is already installed,
+e.g. via `npx skills`, which then wins) and tells the agent the absolute path of
+the CLI, so nothing needs to be on `PATH` for the agent. Update with:
+
+```bash
+opencode plugin check      # is there a newer release?
+opencode plugin update     # fetch it; then restart the OpenCode service / reload
+```
+
+For your own shell, link the CLI (a package install lives under
+`~/.cache/opencode/npm/…/node_modules/opencode-self-improving/skills/self-improving/bin/learn`,
+which changes on update; the path shown by the plugin to the agent is always current):
+
+```bash
+learn --version    # if it is on PATH
+```
+
+### Alternative: `npx skills`
+
+```bash
+npx skills add dot-opencode/self-improving -g -a opencode
+learn install-opencode          # deprecated: symlinks the plugin into ~/.config/opencode/plugins/
 ```
 
 `npx skills add ... -g -a opencode` installs the skill to
@@ -57,8 +82,7 @@ for your platform from the matching GitHub Release, checks its sha256, and cache
 as `bin/.learn-<version>` (or under `~/.cache/self-improving/` if the skill dir is
 read-only). Set `LEARN_BIN_PATH` to use a locally built binary instead.
 
-In a clone of this repo it is `skills/self-improving/bin/learn` (and `bin/learn`).
-Run `learn install-opencode` after putting it on `PATH`, or call it by full path.
+In a clone of this repo it is `skills/self-improving/bin/learn`.
 `learn init` is user-only; the agent never runs it.
 
 ## Storage layout

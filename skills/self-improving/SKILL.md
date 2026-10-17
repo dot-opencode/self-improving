@@ -6,6 +6,8 @@ license: MIT
 
 # Self-Improving
 
+If `learn` is not on PATH (plugin install), use the absolute path given in the `<self-improving>` block or the `/learn-review` prompt wherever this skill says `learn`.
+
 Learnings are raw material for **behavior change**, not knowledge. A plugin
 captures signals into `.learnings/inbox`; the nightly `learn dream` triages them,
 counts repeats by a stable key and prepares proposals. In a session you present

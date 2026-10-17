@@ -1,5 +1,5 @@
 import { spawn as nodeSpawn } from "node:child_process"
-import { realpathSync, statSync } from "node:fs"
+import { readFileSync, realpathSync, statSync } from "node:fs"
 import { appendFile, mkdir, open, readdir, readFile, readlink, realpath, stat } from "node:fs/promises"
 import { homedir } from "node:os"
 import { basename, dirname, join, resolve, sep } from "node:path"
@@ -27,6 +27,7 @@ try {
   // Fall back to the unresolved path.
 }
 const learnCli = resolve(moduleDirectory, "..", "bin", "learn")
+const bundledSkillPath = resolve(moduleDirectory, "..", "SKILL.md")
 const defaultMarkersPath = join(moduleDirectory, "markers.default.json")
 
 const defaultHintsPath = join(moduleDirectory, "hints.default.json")
@@ -43,6 +44,18 @@ const debugEnabled = () => process.env.SELF_IMPROVING_DEBUG === "1"
 
 function timestamp() {
   return new Date().toISOString().replace(/\.\d+Z$/, "Z")
+}
+
+function parseSkill(raw) {
+  const match = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/.exec(raw)
+  let description = ""
+  if (match) {
+    for (const line of match[1].split(/\r?\n/)) {
+      const kv = /^description:\s*(.+)$/.exec(line)
+      if (kv) description = kv[1].trim().replace(/^['"]|['"]$/g, "")
+    }
+  }
+  return { description, body: (match ? raw.slice(match[0].length) : raw).trim() }
 }
 
 // A plain V2 plugin object ({ id, setup }); no imports from @opencode packages so
@@ -403,7 +416,8 @@ export default {
         } catch {
           proposed = []
         }
-        const text = buildInjection(index, await unackedCount(state), proposed)
+        // Under a plugin install `learn` is not on PATH: tell the agent the absolute shim path.
+        const text = buildInjection(index, await unackedCount(state), proposed, cli)
         if (!text) return
         if (ev.system.some((part) => typeof part?.text === "string" && part.text.includes(OPEN))) return
         ev.system.push({ type: "text", text })
@@ -560,7 +574,7 @@ export default {
           "",
           "For each: read the file and present its Start Packet / Proposal, then wait for my decision (approve / changes / reject) before moving to the next one.",
           "Apply only after I approve.",
-          "Run CLI commands as `learn --profile <profile> …` (profile from the list above), because this project may have no .learnings symlink.",
+          `Run CLI commands as \`${cli} --profile <profile> …\` (\`learn\` may not be on PATH; profile from the list above), because this project may have no .learnings symlink.`,
           "End each item with an explicit terminal state (applied | candidate(seen=N) | rejected | open-question | no-delta).",
         ].join("\n")
         await ctx.session.prompt({ ...input?.prompt, sessionID: input?.sessionID, delivery: input?.delivery, text })
@@ -578,6 +592,30 @@ export default {
       }
     } catch (error) {
       log("command registration failed", { error: String(error) })
+    }
+
+    // Register the bundled skill in-process (no copy needed). An existing skill with
+    // the same id (npx skills install, user copy) wins.
+    let skillRegistration
+    try {
+      if (typeof ctx.skill?.transform === "function") {
+        const mdPath = deps.skillPath ?? bundledSkillPath
+        const raw = readFileSync(mdPath, "utf8").replace(/^\uFEFF/, "")
+        const parsed = parseSkill(raw)
+        skillRegistration = await ctx.skill.transform((editor) => {
+          try {
+            if (typeof editor?.add !== "function") return log("ctx.skill editor lacks add(); bundled skill not registered")
+            if (typeof editor.get === "function" && editor.get("self-improving")) {
+              return log("skill self-improving already provided elsewhere; bundled copy not registered")
+            }
+            editor.add({ id: "self-improving", name: "self-improving", description: parsed.description, path: mdPath, content: parsed.body })
+          } catch (error) {
+            log("bundled skill registration failed", { error: String(error) })
+          }
+        })
+      }
+    } catch (error) {
+      log("bundled skill registration failed", { error: String(error) })
     }
 
     try {
@@ -604,6 +642,13 @@ export default {
       }
     })().catch((error) => debug("event subscription failed", { error: String(error) }))
 
-    return () => controller.abort()
+    return () => {
+      controller.abort()
+      try {
+        skillRegistration?.dispose?.()
+      } catch {
+        // Cleanup must not throw.
+      }
+    }
   },
 }
