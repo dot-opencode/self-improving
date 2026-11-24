@@ -61,17 +61,14 @@ pub fn cmd_schedule(ctx: &Ctx, args: &[String]) {
         Some(("install", rest)) => {
             let mut time = "05:30";
             let mut model = None;
-            let mut flags = rest.chunks_exact(2);
-            for pair in &mut flags {
-                let val = pair[1].as_str();
-                match pair[0].as_str() {
+            let mut flags = rest.iter();
+            while let Some(flag) = flags.next() {
+                let val = flags.next().map_or("", String::as_str);
+                match flag.as_str() {
                     "--at" if valid_time(val) => time = val,
                     "--model" if !val.is_empty() && !val.starts_with('-') => model = Some(val),
                     _ => die(USAGE),
                 }
-            }
-            if !flags.remainder().is_empty() {
-                die(USAGE);
             }
             install(&Backend::new(), ctx, time, model);
         }
