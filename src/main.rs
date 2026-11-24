@@ -54,9 +54,10 @@ commands:
   dream --report [--stale-days N] [--profile <p>]
                                             read-only whole-store report: unacked inbox, similar
                                             candidates, ready for proposal, stale, unusable
-  dream [--profile <p>] [--model <provider/model>] [--if-changed] [--print-config]
+  dream [--profile <p>] [--model <provider/model>] [--allow-plugin <name>]... [--if-changed] [--print-config]
                                             consolidate the store with a sandboxed OpenCode run
-                                             (AGENT_LEARNINGS_DREAM_MODEL sets the default model)
+                                              (AGENT_LEARNINGS_DREAM_MODEL sets the default model)
+                                              (AGENT_LEARNINGS_DREAM_PLUGINS lists allowed plugins)
   schedule install [--at HH:MM] [--model <provider/model>]
                                              install the nightly dream job (default 05:30)
   schedule uninstall | status                remove or inspect the nightly dream job

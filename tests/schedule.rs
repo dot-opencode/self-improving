@@ -53,6 +53,7 @@ fn systemd_install_reinstall_and_status() {
     e.set("LEARN_BIN_PATH", "/custom $binary");
     e.set("LEARN_SKILL_DIR", "");
     e.set("AGENT_LEARNINGS_DREAM_MODEL", "provider/default");
+    e.set("AGENT_LEARNINGS_DREAM_PLUGINS", "provider,@scope/plugin");
     let dir = e.home.join(".config/systemd/user");
     let service = dir.join("agent-learnings-dream.service");
     let timer = dir.join("agent-learnings-dream.timer");
@@ -85,6 +86,7 @@ fn systemd_install_reinstall_and_status() {
         "Environment=\"PATH=",
         "Environment=\"LEARN_BIN_PATH=/custom $binary\"",
         "Environment=\"AGENT_LEARNINGS_DREAM_MODEL=provider/default\"",
+        "Environment=\"AGENT_LEARNINGS_DREAM_PLUGINS=provider,@scope/plugin\"",
     ] {
         assert!(unit.contains(needle), "missing {needle:?} in {unit}");
     }

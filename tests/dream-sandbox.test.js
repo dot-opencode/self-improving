@@ -37,7 +37,9 @@ test("template: default agent and agent set", () => {
 });
 
 test("template: policies mirror the primary agent's permissions", () => {
-  const fromPolicies = template.experimental.policies.map((p) => p.resource.replace(":", "\u0000"));
+  const fromPolicies = template.experimental.policies
+    .filter((p) => p.action === "tool.use")
+    .map((p) => p.resource.replace(":", "\u0000"));
   const fromAgent = template.agents["learn-dream"].permissions
     .filter((p) => p.action !== "*")
     .map((p) => `${p.action}\u0000${p.resource}`);
@@ -224,7 +226,7 @@ test("sandbox simulation: extra read-only git and which allowed, injection and g
 
 test("sandbox simulation: experimental.policies behave the same", () => {
   const rules = render()
-    .experimental.policies.filter((p) => p.action === "permission" && p.resource.startsWith("shell:"))
+    .experimental.policies.filter((p) => p.action === "tool.use" && p.resource.startsWith("shell:"))
     .map((p) => ({ action: "shell", resource: p.resource.slice("shell:".length), effect: p.effect }));
   checkReadonly(rules, "policies");
 });
@@ -238,10 +240,10 @@ test("print-config substitutes every placeholder and stays valid JSON", () => {
     const home = join(tmp, "home");
     mkdirSync(home);
     const out = execFileSync(LEARN, ["dream", "--print-config"], {
-      env: { ...process.env, HOME: home, AGENT_LEARNINGS_HOME: store },
+      env: { ...process.env, HOME: home, AGENT_LEARNINGS_HOME: store, AGENT_LEARNINGS_DREAM_PLUGINS: "" },
       encoding: "utf8",
     });
-    assert.doesNotMatch(out, /__STORE__|__LEARN_BIN__|__HOME__/);
+    assert.doesNotMatch(out, /__STORE__|__LEARN_BIN__|__HOME__|__PLUGIN_ALLOW__/);
     const cfg = JSON.parse(out);
     const res = cfg.agents["learn-dream"].permissions.map((p) => p.resource);
     assert.ok(res.includes(`${store}/*`), "store substituted (with space and &)");

@@ -17,6 +17,10 @@ script, a skill patch, a new skill, or (as a suggestion only) an `AGENTS.md` lin
   The unattended dream run uses its own OpenCode database at
   `<store>/.git/learn-dream.db`, which holds the latest run only, so dream sessions
   never show up in OpenCode's session list. Inspect it with `sqlite3`.
+  The dream sandbox denies MCP and plugins by default. Use `--allow-plugin <name>`
+  (repeatable) or set `AGENT_LEARNINGS_DREAM_PLUGINS` to a comma-separated list.
+  Flags add to the list, and names match substrings of configured plugin specs.
+  Allowed plugins run with full plugin privileges, so only allow plugins you trust.
 - Once applied, the lesson lives in its owner — not in context — and the candidate
   stops growing.
 
@@ -66,7 +70,8 @@ to pick a model. On Linux this creates a systemd user service and timer. On
 macOS it creates a LaunchAgent in `~/Library/LaunchAgents/`.
 
 Install captures the resolved store path (`AGENT_LEARNINGS_HOME`) and any non-empty
-`PATH`, `LEARN_BIN_PATH`, `LEARN_SKILL_DIR`, and `AGENT_LEARNINGS_DREAM_MODEL`.
+`PATH`, `LEARN_BIN_PATH`, `LEARN_SKILL_DIR`, `AGENT_LEARNINGS_DREAM_MODEL`, and
+`AGENT_LEARNINGS_DREAM_PLUGINS`.
 Run `learn schedule install` again if these values or the CLI path change, for
 example after a plugin update.
 

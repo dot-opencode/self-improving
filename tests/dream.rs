@@ -333,9 +333,18 @@ fn print_config_and_glob_guard() {
             &format!("read:{}/.ssh/*", e.home.display()),
         )
         .has("print-config: learn-dream agent", "\"learn-dream\"");
-    check(
-        "print-config is valid JSON",
-        serde_json::from_str::<serde_json::Value>(&o.stdout).is_ok(),
+    let config: serde_json::Value = serde_json::from_str(&o.stdout).expect("valid JSON");
+    assert_eq!(
+        config["experimental"]["policies"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|p| p["action"] == "integration.use")
+            .collect::<Vec<_>>(),
+        vec![
+            &serde_json::json!({"action": "integration.use", "resource": "mcp:*", "effect": "deny"}),
+            &serde_json::json!({"action": "integration.use", "resource": "plugin:*", "effect": "deny"}),
+        ],
     );
 
     for gc in ["*", "?", "[x]", "{a,b}"] {
@@ -346,6 +355,47 @@ fn print_config_and_glob_guard() {
             o.rc != 0 && o.out().contains("path contains a glob character"),
         );
     }
+}
+
+#[test]
+fn print_config_allows_plugins_after_deny() {
+    let f = fixture();
+    let o =
+        f.e.cmd(&[
+            "dream",
+            "--print-config",
+            "--allow-plugin",
+            "@scope/provider@1.0",
+            "--allow-plugin",
+            "github:team/extra-plugin#release",
+        ])
+        .env("AGENT_LEARNINGS_DREAM_PLUGINS", "env_provider,second.env")
+        .run();
+    o.ok("print-config with plugins")
+        .lacks("no allow placeholder", "__PLUGIN_ALLOW__");
+    let config: serde_json::Value = serde_json::from_str(&o.stdout).unwrap();
+    let policies = config["experimental"]["policies"].as_array().unwrap();
+    let plugin_deny =
+        serde_json::json!({"action": "integration.use", "resource": "plugin:*", "effect": "deny"});
+    let deny = policies.iter().position(|p| p == &plugin_deny).unwrap();
+    let allows: Vec<_> = ["env_provider", "second.env", "@scope/provider@1.0", "github:team/extra-plugin#release"]
+        .into_iter().map(|name| serde_json::json!({"action": "integration.use", "resource": format!("plugin:*{name}*"), "effect": "allow"})).collect();
+    assert_eq!(&policies[deny + 1..], allows);
+}
+
+#[test]
+fn rejects_invalid_plugin_names_and_report_flag() {
+    let f = fixture();
+    for name in ["", "provider*", "two words", "nonascii-é"] {
+        f.e.run(&["dream", "--print-config", "--allow-plugin", name])
+            .die(name, "invalid dream plugin name");
+    }
+    f.e.cmd(&["dream", "--print-config"])
+        .env("AGENT_LEARNINGS_DREAM_PLUGINS", "valid,,other")
+        .run()
+        .die("empty entry in env", "invalid dream plugin name");
+    f.e.run(&["dream", "--report", "--allow-plugin", "valid"])
+        .die("plugin flag with report", "usage: learn dream");
 }
 
 #[test]

@@ -77,6 +77,7 @@ impl Env {
             "LEARN_TODAY",
             "LEARN_DREAM",
             "AGENT_LEARNINGS_DREAM_MODEL",
+            "AGENT_LEARNINGS_DREAM_PLUGINS",
             "LEARN_SKILL_DIR",
             "GIT_DIR",
             "GIT_WORK_TREE",

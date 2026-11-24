@@ -133,6 +133,7 @@ fn install(backend: &Backend, ctx: &Ctx, time: &str, model: Option<&str>) {
         "LEARN_BIN_PATH",
         "LEARN_SKILL_DIR",
         "AGENT_LEARNINGS_DREAM_MODEL",
+        "AGENT_LEARNINGS_DREAM_PLUGINS",
     ]
     .into_iter()
     .filter_map(|key| env_nonempty(key).map(|val| (key, val)))

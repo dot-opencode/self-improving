@@ -363,11 +363,41 @@ fn report(ctx: &mut Ctx, stale_days: i64, only: &str) {
 // rendering
 // ---------------------------------------------------------------------------
 
-fn render(template: &str, store: &str, bin: &str, home: &str) -> String {
+fn render_paths(template: &str, store: &str, bin: &str, home: &str) -> String {
     let s = template.trim_end_matches('\n');
     let s = s.replace("__STORE__", store);
     let s = s.replace("__LEARN_BIN__", bin);
     s.replace("__HOME__", home)
+}
+
+fn render(template: &str, store: &str, bin: &str, home: &str, plugins: &[&str]) -> String {
+    let mut out = String::new();
+    for line in template.trim_end_matches('\n').split('\n') {
+        if line.contains("__PLUGIN_ALLOW__") {
+            for plugin in plugins {
+                out.push_str(&line.replace("__PLUGIN_ALLOW__", plugin));
+                out.push('\n');
+            }
+        } else {
+            out.push_str(&render_paths(line, store, bin, home));
+            out.push('\n');
+        }
+    }
+    out.pop();
+    out
+}
+
+fn plugin_name(name: &str) -> &str {
+    if name.is_empty()
+        || !name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._@/#:-".contains(&b))
+    {
+        die(&format!(
+            "invalid dream plugin name {name:?}: use one or more of A-Z, a-z, 0-9, or ._@/#:-"
+        ));
+    }
+    name
 }
 
 // ---------------------------------------------------------------------------
@@ -513,13 +543,14 @@ fn which(cmd: &str) -> bool {
 }
 
 pub fn cmd_dream(ctx: &mut Ctx, args: &[String]) {
-    let usage = "usage: learn dream [--report [--stale-days N]] [--profile <p>] [--model <provider/model>] [--if-changed] [--print-config]";
+    let usage = "usage: learn dream [--report [--stale-days N]] [--profile <p>] [--model <provider/model>] [--allow-plugin <name>]... [--if-changed] [--print-config]";
     // AGENT_LEARNINGS_DREAM_MODEL sets the default model; --model overrides it.
     let mut model = std::env::var("AGENT_LEARNINGS_DREAM_MODEL").unwrap_or_default();
     let (mut report_f, mut print_config, mut model_flag, mut if_changed) =
         (false, false, false, false);
     let mut stale_days: Option<i64> = None;
     let mut profile = String::new();
+    let mut plugin_flags = Vec::new();
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -564,17 +595,36 @@ pub fn cmd_dream(ctx: &mut Ctx, args: &[String]) {
                 model = val(args, &mut i, "--model");
                 model_flag = true;
             }
+            "--allow-plugin" => {
+                let name = args.get(i + 1).unwrap_or_else(|| die(usage));
+                plugin_flags.push(plugin_name(name));
+                i += 2;
+            }
             _ => die(usage),
         }
     }
     if report_f {
-        if model_flag || print_config || if_changed {
+        if model_flag || print_config || if_changed || !plugin_flags.is_empty() {
             die(usage);
         }
     } else if stale_days.is_some() {
         die(usage);
     }
     let stale_days = stale_days.unwrap_or(90);
+    let plugins_env = if report_f {
+        String::new()
+    } else {
+        match std::env::var("AGENT_LEARNINGS_DREAM_PLUGINS") {
+            Ok(value) => value,
+            Err(std::env::VarError::NotPresent) => String::new(),
+            Err(e) => die(&format!("invalid AGENT_LEARNINGS_DREAM_PLUGINS: {e}")),
+        }
+    };
+    let mut plugins = Vec::new();
+    if !plugins_env.is_empty() {
+        plugins.extend(plugins_env.split(',').map(plugin_name));
+    }
+    plugins.extend(plugin_flags);
 
     ctx.load_store();
     if !profile.is_empty() {
@@ -612,8 +662,9 @@ pub fn cmd_dream(ctx: &mut Ctx, args: &[String]) {
         &ctx.store_home,
         &ctx.script_path,
         &home,
+        &plugins,
     );
-    let mut prompt = render(
+    let mut prompt = render_paths(
         &read_text(&prompt_path).unwrap_or_default(),
         &ctx.store_home,
         &ctx.script_path,
