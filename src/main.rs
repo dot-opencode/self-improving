@@ -11,6 +11,7 @@ mod git;
 mod grep;
 mod inbox;
 mod markers;
+mod schedule;
 mod store;
 mod util;
 
@@ -55,7 +56,10 @@ commands:
                                             candidates, ready for proposal, stale, unusable
   dream [--profile <p>] [--model <provider/model>] [--if-changed] [--print-config]
                                             consolidate the store with a sandboxed OpenCode run
-                                            (AGENT_LEARNINGS_DREAM_MODEL sets the default model)
+                                             (AGENT_LEARNINGS_DREAM_MODEL sets the default model)
+  schedule install [--at HH:MM] [--model <provider/model>]
+                                             install the nightly dream job (default 05:30)
+  schedule uninstall | status                remove or inspect the nightly dream job
   backup [--push]                           commit (and push) the store
   install-opencode                          install the global OpenCode plugin
 
@@ -141,6 +145,7 @@ fn run(ctx: &mut Ctx, argv: &[String]) {
         "prune" => cmds::cmd_prune(ctx, rest),
         "markers" => cmds::cmd_markers(ctx, rest),
         "dream" => dream::cmd_dream(ctx, rest),
+        "schedule" => schedule::cmd_schedule(ctx, rest),
         "backup" => cmds::cmd_backup(ctx, rest),
         "install-opencode" => cmds::cmd_install_opencode(ctx, rest),
         "-v" | "--version" => {

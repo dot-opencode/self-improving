@@ -58,6 +58,22 @@ which changes on update; the path shown by the plugin to the agent is always cur
 learn --version    # if it is on PATH
 ```
 
+### Nightly run
+
+Run `learn schedule install` to schedule `learn dream --if-changed` at 05:30
+local time. Use `--at HH:MM` to pick a different time or `--model provider/model`
+to pick a model. On Linux this creates a systemd user service and timer. On
+macOS it creates a LaunchAgent in `~/Library/LaunchAgents/`.
+
+Install captures the resolved store path (`AGENT_LEARNINGS_HOME`) and any non-empty
+`PATH`, `LEARN_BIN_PATH`, `LEARN_SKILL_DIR`, and `AGENT_LEARNINGS_DREAM_MODEL`.
+Run `learn schedule install` again if these values or the CLI path change, for
+example after a plugin update.
+
+Use `learn schedule status` to inspect the job and `learn schedule uninstall`
+to remove it. For logs, use `journalctl --user -u agent-learnings-dream` on Linux
+or read `~/Library/Logs/agent-learnings-dream.log` on macOS.
+
 ### Alternative: `npx skills`
 
 ```bash

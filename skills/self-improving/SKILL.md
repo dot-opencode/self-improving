@@ -189,6 +189,7 @@ learn apply <key> --owner <o> --change-ref <ref>
 learn reject <key> --reason "<…>"
 learn dream --report                 # read-only summary of what dream would look at
 learn dream [--if-changed] [--model m]   # the nightly job (unattended agent run); not for in-session use
+learn schedule install               # install the nightly dream job
 learn prune [--days 90]              # seen=1 and stale → rejected/
 learn markers list | add --tier <t> "<re>" | test "<text>"
 learn backup [--push] | install-opencode | --version
