@@ -9,9 +9,9 @@ fn version_help_unknown() {
     let o = e.run(&["--version"]);
     check("--version", o.rc == 0 && o.stdout.starts_with("learn "));
     eq::<String, _>(
-        "--version is learn 0.1.2",
+        "--version is learn 0.2.0",
         o.stdout.trim().to_string(),
-        "learn 0.1.2",
+        "learn 0.2.0",
     );
     e.run(&["help"]).ok("help");
     e.run(&["nope"])
